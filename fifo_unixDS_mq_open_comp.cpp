@@ -18,10 +18,9 @@
 #define SOCKET_PATH "/tmp/bench.sock"
 #define FIFO_PATH "/tmp/bench.fifo"
 #define QUEUE_NAME "/bench_queue"
-#define BUFFER_SIZE 1024
 #define DATA_SIZE (100 * 1024)  // 100KB
 #define BUFFER_SIZE (1024 * 32)
-#define NUM_ITERATIONS 1000
+#define NUM_ITERATIONS 10000
 
 
 /*
@@ -35,6 +34,13 @@ struct shared_data {
   char buffer[BUFFER_SIZE];
 };
 
+void print_bytes(char *buffer) {
+  printf("First 10 bytes: ");
+  for (int i = 0; i < 10; i++) {
+    printf("0x%02x ", (unsigned char)buffer[i]);
+  }
+  printf("\n");
+}
 
 void random_bits(char* buffer, size_t num_bytes) {
   int fd = open("/dev/urandom", O_RDONLY);
@@ -53,6 +59,9 @@ long long get_usec(void) {
 void fifo_source(void) {
     char buffer[BUFFER_SIZE];
     random_bits(buffer, BUFFER_SIZE);
+
+    printf("FIFO Sender:   ");
+    print_bytes(buffer);
 
     int num_iterations = NUM_ITERATIONS;
     
@@ -93,6 +102,10 @@ void fifo_target(void) {
     }
     
     long long end_time = get_usec();
+
+    printf("FIFO Receiver: ");
+    print_bytes(buffer);
+
     printf("FIFO receiver finished: %lld usec\n", end_time - start_time);
     close(fd);
 }
@@ -260,21 +273,6 @@ void eventfd_sender(int efd, struct shared_data* shm) {
 	num_iterations--;
     }
 
-    /*
-    for (int i = 0; i < NUM_ITERATIONS; i++) {
-        // Write data to shared memory
-        memcpy(shm->buffer, test_data, BUFFER_SIZE);
-        shm->size = BUFFER_SIZE;
-
-        // Signal receiver using eventfd
-        uint64_t u = 1;
-        if (write(efd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {
-            perror("write eventfd");
-            exit(1);
-        }
-    }
-    */
-
     long long end_time = get_usec();
     printf("Sender finished: %lld usec\n", end_time - start_time);
 }
@@ -291,25 +289,6 @@ void eventfd_receiver(int efd, struct shared_data* shm) {
         read(efd, &u, sizeof(uint64_t));
       num_iterations--;
     }
-
-    /*
-    for (int i = 0; i < NUM_ITERATIONS; i++) {
-        // Wait for signal from sender
-        uint64_t u;
-        if (read(efd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {
-            perror("read eventfd");
-            exit(1);
-        }
-
-        // Process data from shared memory
-        // In this example, we just verify the size
-        if (shm->size != BUFFER_SIZE) {
-            fprintf(stderr, "Size mismatch: expected %d, got %zu\n", 
-                    BUFFER_SIZE, shm->size);
-            exit(1);
-        }
-    }
-    */
 
     long long end_time = get_usec();
     printf("Receiver finished: %lld usec\n", end_time - start_time);
@@ -372,9 +351,7 @@ void cma_sender(struct shared_info* info, pid_t receiver_pid, int sync_fd) {
     }
 
     long long end_time = get_usec();
-    printf("Run_sender finsihed: %lld usec\n", end_time - start_time);
-
-    printf("Sender done\n");
+    printf("Run_sender finished: %lld usec\n", end_time - start_time);
 
     // Clean up
     munmap(buffer, BUFFER_SIZE);
@@ -426,8 +403,11 @@ void cma_receiver(struct shared_info* info, int sync_fd) {
     }
     
     long long end_time = get_usec();
+    end_time-= 1000000LL;
     printf("Run_receiver finished: %lld usec\n", end_time - start_time);
-    
+
+
+#ifdef CMA_DIAGNOSTICS
     // Print first bytes
     printf("First 10 bytes received: ");
     for (int i = 0; i < 10; i++) {
@@ -458,6 +438,7 @@ void cma_receiver(struct shared_info* info, int sync_fd) {
             (size_t)(buffer[matches] != 'A' ? matches : 0),
             (unsigned char)buffer[matches]);
     }
+#endif
 
     // Clean up
     munmap(buffer, BUFFER_SIZE);
@@ -493,7 +474,6 @@ int main(void) {
         cma_receiver(info, sync_fd);
         exit(0);
     } else {
-        sleep(1);  // Give receiver time to set up
         cma_sender(info, pid, sync_fd);
         int status;
         waitpid(pid, &status, 0);

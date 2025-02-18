@@ -79,45 +79,6 @@ long long get_usec(void) {
     return tv.tv_sec * 1000000LL + tv.tv_usec;
 }
 
-// This function reads and discards all messages from a queue until it's empty
-void drain_message_queue(const char* queue_name) {
-    // Open the queue for reading
-    mqd_t mq = mq_open(queue_name, O_RDONLY | O_NONBLOCK);
-    if (mq == (mqd_t)-1) {
-        // If we can't open it, it might not exist, which is fine
-        return;
-    }
-
-    // Get queue attributes to know message size
-    struct mq_attr attr;
-    if (mq_getattr(mq, &attr) == -1) {
-        mq_close(mq);
-        return;
-    }
-
-    // Allocate a buffer for reading messages
-    char* buffer = new char[attr.mq_msgsize];
-    unsigned int prio;
-
-    // Read messages until queue is empty
-    while (true) {
-        ssize_t bytes = mq_receive(mq, buffer, attr.mq_msgsize, &prio);
-        if (bytes == -1) {
-            if (errno == EAGAIN) {
-                // Queue is empty
-                break;
-            }
-            // Some other error occurred
-            break;
-        }
-    }
-
-    // Clean up
-    delete[] buffer;
-    mq_close(mq);
-    mq_unlink(queue_name);
-}
-
 //				//
 // Start: FIFO Implementation	//
 //				//
@@ -492,12 +453,7 @@ void eventfd_receiver(int efd, struct shared_data* shm) {
 
 }
 
-int main(int argc, char **argv) {
-
-  if (argc > 1 && strcmp(argv[1], "--cleanup") == 0) {
-    drain_message_queue(QUEUE_NAME);
-    exit(0);
-  }
+int main(void) {
 
   struct shared_data* shm = (struct shared_data*)mmap(NULL, sizeof(struct shared_data),
 						      PROT_READ | PROT_WRITE,

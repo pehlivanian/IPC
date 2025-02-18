@@ -20,6 +20,7 @@
 #define QUEUE_NAME "/bench_queue"
 #define DATA_SIZE (100 * 1024)  // 100KB
 #define BUFFER_SIZE (1024 * 32)
+#define SHM_NAME "/my_shared_mem"
 #define NUM_ITERATIONS 10000
 
 
@@ -295,8 +296,7 @@ void eventfd_receiver(int efd, struct shared_data* shm) {
 }
 
 
-#define BUFFER_SIZE (1024 * 1024)  // 1MB buffer
-#define SHM_NAME "/my_shared_mem"
+// #define BUFFER_SIZE (1024 * 1024)  // 1MB buffer
 
 struct shared_info {
     void* buffer_addr;

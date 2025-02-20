@@ -21,7 +21,7 @@
 #define FIFO_PATH "/tmp/bench.fifo"
 #define QUEUE_NAME "/bench_queue"
 #define SHM_NAME "/my_shared_mem"
-#define BUFFER_SIZE (35840)
+#define BUFFER_SIZE (47104)
 #define NUM_ITERATIONS 1000
 
 // Shared structures
@@ -196,7 +196,7 @@ void fifo_target(void) {
     long long end_time = get_usec();
 
     // printf("FIFO TARGET:\n============\n");
-    printf("FIFO target finished [bytes rec: %zd]: %lld usec (%.2f MB/s)\n", 
+    printf("FIFO target finished [bytes rec: %d]: %lld usec (%.2f MB/s)\n", 
 	   BUFFER_SIZE,
            end_time - start_time,
            ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
@@ -343,7 +343,7 @@ void socket_target(void) {
     
     long long end_time = get_usec();
     // printf("UNIX Domain Socket TARGET:\n============\n");
-    printf("UNIX Domain Socket target finished [bytes rec: %zd]: %lld usec (%.2f MB/s)\n", 
+    printf("UNIX Domain Socket target finished [bytes rec: %d]: %lld usec (%.2f MB/s)\n", 
            BUFFER_SIZE,
            end_time - start_time,
            ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
@@ -484,7 +484,7 @@ void eventfd_receiver(int efd, struct shared_data* shm) {
   long long end_time = get_usec();
 
   // printf("Shmem+Eventfd TARGET:\n============\n");
-  printf("Shmem+Eventfd target finished [bytes rec: %zd]: %lld usec (%.2f MB/s)\n", 
+  printf("Shmem+Eventfd target finished [bytes rec: %d]: %lld usec (%.2f MB/s)\n", 
 	 BUFFER_SIZE,
 	 end_time - start_time,
 	 ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));

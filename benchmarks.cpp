@@ -4,6 +4,8 @@
 #include <cassert>
 #include <unistd.h>
 #include <fcntl.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -357,6 +359,282 @@ void socket_target(void) {
 //						//
 
 //					//
+// Start: TCP/IP Socket Implementation	//
+//					//
+void tcp_source(int port) {
+    char buffer[BUFFER_SIZE];
+    random_bits(buffer, BUFFER_SIZE);
+    
+    int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock_fd < 0) {
+        perror("TCP Socket creation failed");
+        exit(1);
+    }
+
+    // Enable address reuse
+    int optval = 1;
+    if (setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
+        perror("TCP Socket reuse failed");
+        exit(1);
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    
+    // Wait for server to be ready
+    sleep(1);
+    
+    if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("TCP Socket connect failed");
+        exit(1);
+    }
+
+    long long start_time = get_usec();
+    
+    for (int i = 0; i < NUM_ITERATIONS; ++i) {
+        size_t bytes_sent = 0;
+        while (bytes_sent < BUFFER_SIZE) {
+            ssize_t result = send(sock_fd, buffer + bytes_sent,
+                                  BUFFER_SIZE - bytes_sent, 0);
+            if (result < 0) {
+                if (errno == EINTR) continue;  // Interrupted, retry
+                perror("TCP Socket send failed");
+                exit(EXIT_FAILURE);
+            } else if (result == 0) {
+                fprintf(stderr, "TCP Connection closed by peer\n");
+                exit(EXIT_FAILURE);
+            }
+            bytes_sent += result;
+        }
+    }
+
+    long long end_time = get_usec();
+    printf("TCP Socket source finished: [bytes sent: %d] %lld usec (%.2f MB/s)\n", 
+           BUFFER_SIZE,
+           end_time - start_time,
+           ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
+    
+    close(sock_fd);
+}
+
+void tcp_target(int port) {
+    char buffer[BUFFER_SIZE];
+    
+    int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock_fd < 0) {
+        perror("TCP Socket creation failed");
+        exit(1);
+    }
+    
+    // Enable address reuse
+    int optval = 1;
+    if (setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
+        perror("TCP Socket reuse failed");
+        exit(1);
+    }
+    
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = INADDR_ANY;
+    
+    // Unlink any existing binding
+    unlink(SOCKET_PATH);  // If you're using a socket path
+    
+    if (bind(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("TCP Socket bind failed");
+        exit(1);
+    }
+    
+    if (listen(sock_fd, 1) < 0) {
+        perror("TCP Socket listen failed");
+        exit(1);
+    }
+    
+    int client_fd = accept(sock_fd, NULL, NULL);
+    if (client_fd < 0) {
+        perror("TCP Socket accept failed");
+        exit(1);
+    }
+
+    long long start_time = get_usec();
+ 
+    for (int i = 0; i < NUM_ITERATIONS; ++i) {
+        size_t bytes_received = 0;
+        while (bytes_received < BUFFER_SIZE) {
+            ssize_t result = recv(client_fd, buffer + bytes_received,
+                                  BUFFER_SIZE - bytes_received, 0);
+
+            if (result < 0) {
+                if (errno == EINTR) continue;  // Interrupted, retry
+                perror("TCP Socket recv failed");
+                exit(EXIT_FAILURE);
+            } else if (result == 0) {
+                fprintf(stderr, "TCP Connection closed by peer\n");
+                exit(EXIT_FAILURE);
+            }
+            
+            bytes_received += result;
+        }
+    }
+    
+    long long end_time = get_usec();
+    printf("TCP Socket target finished [bytes rec: %d]: %lld usec (%.2f MB/s)\n", 
+           BUFFER_SIZE,
+           end_time - start_time,
+           ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
+    
+    close(client_fd);
+    close(sock_fd);
+    
+    // Cleanup
+    char socket_path[256];
+    snprintf(socket_path, sizeof(socket_path), "/tmp/tcp_bench_%d.sock", port);
+    unlink(socket_path);
+}
+//					//
+// End: TCP/IP Socket Implementation	//
+//					//
+
+//					//
+// Start: UDP Implementation		//
+//					//
+void udp_source(int port) {
+    char buffer[BUFFER_SIZE];
+    random_bits(buffer, BUFFER_SIZE);
+    
+    int sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock_fd < 0) {
+        perror("UDP Socket creation failed");
+        exit(1);
+    }
+
+    // Enable address reuse
+    int optval = 1;
+    if (setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
+        perror("UDP Socket reuse failed");
+        exit(1);
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    
+    // Bind to a local port for sending
+    struct sockaddr_in local_addr;
+    memset(&local_addr, 0, sizeof(local_addr));
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_port = htons(0);  // Let system assign a port
+    local_addr.sin_addr.s_addr = INADDR_ANY;
+    
+    if (bind(sock_fd, (struct sockaddr*)&local_addr, sizeof(local_addr)) < 0) {
+        perror("UDP Socket local bind failed");
+        exit(1);
+    }
+
+    // Wait for receiver to be ready
+    sleep(1);
+
+    long long start_time = get_usec();
+    
+    for (int i = 0; i < NUM_ITERATIONS; ++i) {
+        size_t bytes_sent = 0;
+        while (bytes_sent < BUFFER_SIZE) {
+            ssize_t result = sendto(sock_fd, buffer + bytes_sent, 
+                                    BUFFER_SIZE - bytes_sent, 0,
+                                    (struct sockaddr*)&addr, sizeof(addr));
+            
+            if (result < 0) {
+                if (errno == EINTR) continue;  // Interrupted, retry
+                perror("UDP Socket sendto failed");
+                exit(EXIT_FAILURE);
+            }
+            
+            bytes_sent += result;
+        }
+    }
+
+    long long end_time = get_usec();
+    printf("UDP Socket source finished: [bytes sent: %d] %lld usec (%.2f MB/s)\n", 
+           BUFFER_SIZE,
+           end_time - start_time,
+           ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
+    
+    close(sock_fd);
+}
+
+void udp_target(int port) {
+    char buffer[BUFFER_SIZE];
+    
+    int sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock_fd < 0) {
+        perror("UDP Socket creation failed");
+        exit(1);
+    }
+    
+    // Enable address reuse
+    int optval = 1;
+    if (setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
+        perror("UDP Socket reuse failed");
+        exit(1);
+    }
+    
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = INADDR_ANY;
+    
+    if (bind(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("UDP Socket bind failed");
+        exit(1);
+    }
+
+    long long start_time = get_usec();
+ 
+    for (int i = 0; i < NUM_ITERATIONS; ++i) {
+        size_t bytes_received = 0;
+        while (bytes_received < BUFFER_SIZE) {
+            struct sockaddr_in sender_addr;
+            socklen_t sender_len = sizeof(sender_addr);
+            
+            ssize_t result = recvfrom(sock_fd, buffer + bytes_received, 
+                                      BUFFER_SIZE - bytes_received, 0, 
+                                      (struct sockaddr*)&sender_addr, &sender_len);
+
+            if (result < 0) {
+                if (errno == EINTR) continue;  // Interrupted, retry
+                perror("UDP Socket recvfrom failed");
+                exit(EXIT_FAILURE);
+            } else if (result == 0) {
+                fprintf(stderr, "UDP connection closed\n");
+                exit(EXIT_FAILURE);
+            }
+            
+            bytes_received += result;
+        }
+    }
+    
+    long long end_time = get_usec();
+    printf("UDP Socket target finished [bytes rec: %d]: %lld usec (%.2f MB/s)\n", 
+           BUFFER_SIZE,
+           end_time - start_time,
+           ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
+    
+    close(sock_fd);
+}
+//					//
+// End: UDP Implementation		//
+//					//
+
+
+//					//
 // Start: POSIX MQ Implementation	//
 //					//
 void mq_source(void) {
@@ -574,5 +852,29 @@ int main(int argc, char **argv) {
 
     close(efd);
     munmap(shm, sizeof(struct shared_data));
+
+    printf("\n=== TCP/IP Socket Benchmark ===\n");
+    pid_t tcp_pid = fork();
+    if (tcp_pid == 0) {
+      tcp_target(54321);
+    } else if (tcp_pid > 0) {
+      tcp_source(54321);
+    } else {
+      perror("fork failed");
+      exit(EXIT_FAILURE);
+    }
+
+    printf("\n=== UDP Socket Benchmark ===\n");
+    pid_t udp_pid = fork();
+    if (udp_pid == 0) {
+      udp_target(54322);
+    } else if (udp_pid > 0) {
+      udp_source(54322);
+    } else {
+      perror("fork failed");
+      exit(EXIT_FAILURE);
+    }
+    
+
     return 0;
 }

@@ -107,6 +107,20 @@ extract_metrics() {
             echo "$size,$source_time,$throughput"
             ;;
             
+	"TCP Socket")
+	   local source_line=$(grep "TCP Socket source finished:" "$output_file" | tail -n 1)
+	   local source_time=$(echo "$source_line" | awk '{for(i=1;i<=NF;i++) if($i=="usec") print $(i-1)}')
+	   local throughput=$(echo "$source_line" | awk -F'[()]' '{print $2}' | awk '{print $1}')
+	   echo "$size,$source_time,$throughput"
+	   ;;
+
+	"UDP Socket")
+	   local source_line=$(grep "UDP Socket source finished:" "$output_file" | tail -n 1)
+	   local source_time=$(echo "$source_line" | awk '{for(i=1;i<=NF;i++) if($i=="usec") print $(i-1)}')
+	   local throughput=$(echo "$source_line" | awk -F'[()]' '{print $2}' | awk '{print $1}')
+	   echo "$size,$source_time,$throughput"
+	   ;;
+
         "UNIX Domain Socket")
             local source_line=$(grep "UNIX Domain Socket source finished:" "$output_file" | tail -n 1)
             local source_time=$(echo "$source_line" | awk '{for(i=1;i<=NF;i++) if($i=="usec") print $(i-1)}')
@@ -140,7 +154,7 @@ echo "" >> benchmark_results_unoptimized/summary.txt
 
 # Generate array of buffer sizes from 1KB to 49KB
 sizes=()
-for ((i=1; i<=48; i++)); do
+for ((i=1; i<=12; i++)); do
     sizes+=($((i * 1024)))
 done
 
@@ -154,6 +168,8 @@ cleanup_resources
 # Create CSV files for results
 # Initialize result files with headers
 echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_unoptimized/fifo_results.csv
+echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_unoptimized/tcp_results.csv
+echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_unoptimized/udp_results.csv
 echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_unoptimized/socket_results.csv
 echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_unoptimized/mq_results.csv
 echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_unoptimized/shm_results.csv
@@ -187,12 +203,16 @@ for size in "${sizes[@]}"; do
 
     # Extract metrics for each IPC method
     fifo_metrics=$(extract_metrics "${output_file}" "FIFO" "${size}")
+    tcp_metrics=$(extract_metrics "${output_file}" "TCP Socket" "${size}")
+    udp_metrics=$(extract_metrics "${output_file}" "UDP Socket" "${size}")
     socket_metrics=$(extract_metrics "${output_file}" "UNIX Domain Socket" "${size}")
     mq_metrics=$(extract_metrics "${output_file}" "POSIX MQ" "${size}")
     shm_metrics=$(extract_metrics "${output_file}" "Shmem+Eventfd" "${size}")
     
     # Write results to individual files
     [ -n "$fifo_metrics" ] && echo "$fifo_metrics" >> benchmark_results_unoptimized/fifo_results.csv
+    [ -n "$tcp_metrics" ] && echo "$tcp_metrics" >> benchmark_results_unoptimized/tcp_results.csv
+    [ -n "$udp_metrics" ] && echo "$udp_metrics" >> benchmark_results_unoptimized/udp_results.csv
     [ -n "$socket_metrics" ] && echo "$socket_metrics" >> benchmark_results_unoptimized/socket_results.csv
     [ -n "$mq_metrics" ] && echo "$mq_metrics" >> benchmark_results_unoptimized/mq_results.csv
     [ -n "$shm_metrics" ] && echo "$shm_metrics" >> benchmark_results_unoptimized/shm_results.csv
@@ -215,7 +235,7 @@ done
 echo "Benchmark Summary" > benchmark_results_unoptimized/summary.txt
 echo "=================" >> benchmark_results_unoptimized/summary.txt
 
-for method in fifo socket mq shm; do
+for method in fifo tcp udp socket mq shm; do
     echo "" >> benchmark_results_unoptimized/summary.txt
     echo "$(tr '[:lower:]' '[:upper:]' <<< ${method}) Results:" >> benchmark_results_unoptimized/summary.txt
     echo "Buffer Size (B), Send Time (-Fìs), Recv Time (ìs), Throughput (MB/s)" >> benchmark_results_unoptimized/summary.txt-A

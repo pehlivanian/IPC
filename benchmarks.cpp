@@ -624,8 +624,8 @@ void udp_target(int port) {
     long long end_time = get_usec();
     printf("UDP Socket target finished [bytes rec: %d]: %lld usec (%.2f MB/s)\n", 
            BUFFER_SIZE,
-           end_time - start_time,
-           ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
+           end_time - start_time - 1000000,
+           ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time - 1000000));
     
     close(sock_fd);
 }
@@ -857,8 +857,10 @@ int main(int argc, char **argv) {
     pid_t tcp_pid = fork();
     if (tcp_pid == 0) {
       tcp_target(54321);
+      exit(0);
     } else if (tcp_pid > 0) {
       tcp_source(54321);
+      wait(NULL);
     } else {
       perror("fork failed");
       exit(EXIT_FAILURE);
@@ -868,13 +870,14 @@ int main(int argc, char **argv) {
     pid_t udp_pid = fork();
     if (udp_pid == 0) {
       udp_target(54322);
+      exit(0);
     } else if (udp_pid > 0) {
       udp_source(54322);
+      wait(NULL);
     } else {
       perror("fork failed");
       exit(EXIT_FAILURE);
     }
-    
 
     return 0;
 }

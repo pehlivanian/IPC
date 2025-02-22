@@ -154,7 +154,7 @@ echo "" >> benchmark_results_unoptimized/summary.txt
 
 # Generate array of buffer sizes from 1KB to 49KB
 sizes=()
-for ((i=1; i<=12; i++)); do
+for ((i=1; i<=48; i++)); do
     sizes+=($((i * 1024)))
 done
 

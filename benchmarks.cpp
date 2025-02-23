@@ -520,7 +520,7 @@ void udp_target(int port) {
     }
     
     // Increase receive buffer size
-    int rcvbuf = BUFFER_SIZE * NUM_ITERATIONS * 2;
+    int rcvbuf = BUFFER_SIZE * 2;
     if (setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
         perror("UDP Socket receive buffer size failed");
         exit(1);

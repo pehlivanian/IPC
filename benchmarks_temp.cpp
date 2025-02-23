@@ -23,7 +23,7 @@
 #define FIFO_PATH "/tmp/bench.fifo"
 #define QUEUE_NAME "/bench_queue"
 #define SHM_NAME "/my_shared_mem"
-#define BUFFER_SIZE (36864)
+#define BUFFER_SIZE (10485760)
 #define NUM_ITERATIONS 1000
 
 // Shared structures
@@ -520,7 +520,7 @@ void udp_target(int port) {
     }
     
     // Increase receive buffer size
-    int rcvbuf = BUFFER_SIZE * NUM_ITERATIONS * 2;
+    int rcvbuf = BUFFER_SIZE * 2;
     if (setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
         perror("UDP Socket receive buffer size failed");
         exit(1);

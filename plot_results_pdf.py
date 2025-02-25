@@ -41,7 +41,7 @@ def create_subplot(methods_to_include, output_filename):
     # Throughput subplot
     for filename, (label, color) in ipc_methods.items():
         if label in methods_to_include:
-            buffer_sizes, send_times, throughputs = read_benchmark_data(f'benchmark_results_unoptimized/{filename}')
+            buffer_sizes, send_times, throughputs = read_benchmark_data(f'benchmark_results_optimized/{filename}')
             ax1.plot(buffer_sizes / 1024, throughputs, 'x-', label=label, color=color, 
                     linewidth=1, markersize=8)
     ax1.set_xlabel('Buffer Size (KB)', fontsize=12)
@@ -53,7 +53,7 @@ def create_subplot(methods_to_include, output_filename):
     # Total time subplot
     for filename, (label, color) in ipc_methods.items():
         if label in methods_to_include:
-            buffer_sizes, send_times, throughputs = read_benchmark_data(f'benchmark_results_unoptimized/{filename}')
+            buffer_sizes, send_times, throughputs = read_benchmark_data(f'benchmark_results_optimized/{filename}')
             ax2.plot(buffer_sizes / 1024, send_times, 'x-', label=label, color=color, 
                     linewidth=1, markersize=8)
     ax2.set_xlabel('Buffer Size (KB)', fontsize=12)
@@ -63,7 +63,7 @@ def create_subplot(methods_to_include, output_filename):
     ax2.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize=10)
     
     plt.tight_layout()
-    plt.savefig(f'benchmark_results_unoptimized/{output_filename}', 
+    plt.savefig(f'benchmark_results_optimized/{output_filename}', 
                 format='pdf', bbox_inches='tight')
     plt.close()
 

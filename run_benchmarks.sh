@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Create a directory for results if it doesn't exist
-mkdir -p benchmark_results_unoptimized
+mkdir -p benchmark_results_optimized
 
 adjust_system_limits() {
     echo 65536 > /proc/sys/fs/mqueue/msg_max
@@ -51,7 +51,7 @@ cleanup_resources() {
 # Function to run benchmark and extract results
 run_benchmark() {
     local size=$1
-    local output_file="benchmark_results_unoptimized/size_${size}.txt"
+    local output_file="benchmark_results_optimized/size_${size}.txt"
     
     echo "Starting benchmark for size $size"
     echo "Before benchmark:"
@@ -70,7 +70,7 @@ run_benchmark() {
     sed -i "s/#define BUFFER_SIZE.*/#define BUFFER_SIZE (${size})/" benchmarks_temp.cpp
     
     # Compile
-    g++ -o benchmarks benchmarks_temp.cpp -lrt
+    g++ -O3 -o benchmarks benchmarks_temp.cpp -lrt
     if [ $? -ne 0 ]; then
         echo "Compilation failed for buffer size ${size}"
         return 1
@@ -145,12 +145,12 @@ extract_metrics() {
 }
 
 # Initialize results files with headers
-echo "Buffer_Size,Send_Time_usec,Recv_Time_usec,Throughput_MBps" > benchmark_results_unoptimized/all_results.csv
+echo "Buffer_Size,Send_Time_usec,Recv_Time_usec,Throughput_MBps" > benchmark_results_optimized/all_results.csv
 
 # Create summary file
-echo "Benchmark Summary" > benchmark_results_unoptimized/summary.txt
-echo "=================" >> benchmark_results_unoptimized/summary.txt
-echo "" >> benchmark_results_unoptimized/summary.txt
+echo "Benchmark Summary" > benchmark_results_optimized/summary.txt
+echo "=================" >> benchmark_results_optimized/summary.txt
+echo "" >> benchmark_results_optimized/summary.txt
 
 # Generate array of buffer sizes from 1KB to 49KB
 sizes=()
@@ -167,12 +167,12 @@ cleanup_resources
 
 # Create CSV files for results
 # Initialize result files with headers
-echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_unoptimized/fifo_results.csv
-echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_unoptimized/tcp_results.csv
-echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_unoptimized/udp_results.csv
-echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_unoptimized/socket_results.csv
-echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_unoptimized/mq_results.csv
-echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_unoptimized/shm_results.csv
+echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_optimized/fifo_results.csv
+echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_optimized/tcp_results.csv
+echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_optimized/udp_results.csv
+echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_optimized/socket_results.csv
+echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_optimized/mq_results.csv
+echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_optimized/shm_results.csv
 
 # Run benchmarks for each size
 # Run benchmarks for each size
@@ -189,7 +189,7 @@ for size in "${sizes[@]}"; do
         continue
     fi
 
-    output_file="benchmark_results_unoptimized/size_${size}.txt"
+    output_file="benchmark_results_optimized/size_${size}.txt"
     
     # Check for message queue success
     if ! grep -q "POSIX MQ target finished" "$output_file"; then
@@ -210,18 +210,18 @@ for size in "${sizes[@]}"; do
     shm_metrics=$(extract_metrics "${output_file}" "Shmem+Eventfd" "${size}")
     
     # Write results to individual files
-    [ -n "$fifo_metrics" ] && echo "$fifo_metrics" >> benchmark_results_unoptimized/fifo_results.csv
-    [ -n "$tcp_metrics" ] && echo "$tcp_metrics" >> benchmark_results_unoptimized/tcp_results.csv
-    [ -n "$udp_metrics" ] && echo "$udp_metrics" >> benchmark_results_unoptimized/udp_results.csv
-    [ -n "$socket_metrics" ] && echo "$socket_metrics" >> benchmark_results_unoptimized/socket_results.csv
-    [ -n "$mq_metrics" ] && echo "$mq_metrics" >> benchmark_results_unoptimized/mq_results.csv
-    [ -n "$shm_metrics" ] && echo "$shm_metrics" >> benchmark_results_unoptimized/shm_results.csv
+    [ -n "$fifo_metrics" ] && echo "$fifo_metrics" >> benchmark_results_optimized/fifo_results.csv
+    [ -n "$tcp_metrics" ] && echo "$tcp_metrics" >> benchmark_results_optimized/tcp_results.csv
+    [ -n "$udp_metrics" ] && echo "$udp_metrics" >> benchmark_results_optimized/udp_results.csv
+    [ -n "$socket_metrics" ] && echo "$socket_metrics" >> benchmark_results_optimized/socket_results.csv
+    [ -n "$mq_metrics" ] && echo "$mq_metrics" >> benchmark_results_optimized/mq_results.csv
+    [ -n "$shm_metrics" ] && echo "$shm_metrics" >> benchmark_results_optimized/shm_results.csv
 
     # Also write to the combined results file
-    echo "${size},${fifo_metrics}" >> benchmark_results_unoptimized/all_results.csv
-    echo "${size},${socket_metrics}" >> benchmark_results_unoptimized/all_results.csv
-    echo "${size},${mq_metrics}" >> benchmark_results_unoptimized/all_results.csv
-    echo "${size},${shm_metrics}" >> benchmark_results_unoptimized/all_results.csv
+    echo "${size},${fifo_metrics}" >> benchmark_results_optimized/all_results.csv
+    echo "${size},${socket_metrics}" >> benchmark_results_optimized/all_results.csv
+    echo "${size},${mq_metrics}" >> benchmark_results_optimized/all_results.csv
+    echo "${size},${shm_metrics}" >> benchmark_results_optimized/all_results.csv
     
     # Add debug output to verify data is being written
     echo "Processed results for size ${size}:"
@@ -232,14 +232,14 @@ for size in "${sizes[@]}"; do
 done
 
 # Create a summary report
-echo "Benchmark Summary" > benchmark_results_unoptimized/summary.txt
-echo "=================" >> benchmark_results_unoptimized/summary.txt
+echo "Benchmark Summary" > benchmark_results_optimized/summary.txt
+echo "=================" >> benchmark_results_optimized/summary.txt
 
 for method in fifo tcp udp socket mq shm; do
-    echo "" >> benchmark_results_unoptimized/summary.txt
-    echo "$(tr '[:lower:]' '[:upper:]' <<< ${method}) Results:" >> benchmark_results_unoptimized/summary.txt
-    echo "Buffer Size (B), Send Time (-Fìs), Recv Time (ìs), Throughput (MB/s)" >> benchmark_results_unoptimized/summary.txt-A
-    cat "benchmark_results_unoptimized/${method}_results.csv" | tail -n +2 >> benchmark_results_unoptimized/summary.txt
+    echo "" >> benchmark_results_optimized/summary.txt
+    echo "$(tr '[:lower:]' '[:upper:]' <<< ${method}) Results:" >> benchmark_results_optimized/summary.txt
+    echo "Buffer Size (B), Send Time (-Fìs), Recv Time (ìs), Throughput (MB/s)" >> benchmark_results_optimized/summary.txt-A
+    cat "benchmark_results_optimized/${method}_results.csv" | tail -n +2 >> benchmark_results_optimized/summary.txt
 done
 
-echo "Benchmarks complete. Results are in the benchmark_results_unoptimized directory."
+echo "Benchmarks complete. Results are in the benchmark_results_optimized directory."

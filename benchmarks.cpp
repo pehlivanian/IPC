@@ -23,7 +23,7 @@
 #define FIFO_PATH "/tmp/bench.fifo"
 #define QUEUE_NAME "/bench_queue"
 #define SHM_NAME "/my_shared_mem"
-#define BUFFER_SIZE (20 * 1024)  // 32KB buffer for all tests
+#define BUFFER_SIZE (20 * 1024)
 #define NUM_ITERATIONS 1000
 
 // Shared structures

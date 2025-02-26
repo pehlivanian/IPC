@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# Create a directory for results if it doesn't exist
 mkdir -p benchmark_results_optimized
 
 adjust_system_limits() {
@@ -23,19 +22,16 @@ cleanup_resources() {
 
     rm -f /dev/mqueue/bench_queue
     
-    # Remove all message queues owned by current user
     for mq in $(ls /dev/mqueue/); do
         rm -f "/dev/mqueue/$mq"
     done
     
-    # Force cleanup of the specific queue we use
     mq_unlink() { 
         if [ -e "/dev/mqueue/bench_queue" ]; then
             rm -f "/dev/mqueue/bench_queue"
         fi
     }
     
-    # Remove any leftover FIFO and socket files
     rm -f /tmp/bench.fifo
     rm -f /tmp/bench.sock
     
@@ -48,7 +44,6 @@ cleanup_resources() {
     fi
 }
 
-# Function to run benchmark and extract results
 run_benchmark() {
     local size=$1
     local output_file="benchmark_results_optimized/size_${size}.txt"
@@ -63,30 +58,25 @@ run_benchmark() {
     echo "After cleanup:"
     check_mq_status
 
-    # Create a temporary copy of the source file
     cp benchmarks.cpp benchmarks_temp.cpp
     
     # Replace the BUFFER_SIZE definition
     sed -i "s/#define BUFFER_SIZE.*/#define BUFFER_SIZE (${size})/" benchmarks_temp.cpp
     
-    # Compile
     g++ -O3 -o benchmarks benchmarks_temp.cpp -lrt
     if [ $? -ne 0 ]; then
         echo "Compilation failed for buffer size ${size}"
         return 1
     fi
     
-    # Run and capture output
     ./benchmarks > "${output_file}"
 
-    # Check if the benchmark completed successfully
     if [ $? -ne 0 ]; then
 	echo "Benchmark failed for buffer size ${size}"
 	cat "${output_file}"
 	return 1
     fi
     
-    # Clean up
     rm benchmarks_temp.cpp
 
     echo "After benchmark:"
@@ -100,7 +90,6 @@ extract_metrics() {
     
     case "$pattern" in
         "FIFO")
-            # Get the last occurrence of the source timing
             local source_line=$(grep "FIFO souce finished:" "$output_file" | tail -n 1)
             local source_time=$(echo "$source_line" | awk '{for(i=1;i<=NF;i++) if($i=="usec") print $(i-1)}')
             local throughput=$(echo "$source_line" | awk -F'[()]' '{print $2}' | awk '{print $1}')
@@ -144,7 +133,6 @@ extract_metrics() {
     esac
 }
 
-# Initialize results files with headers
 echo "Buffer_Size,Send_Time_usec,Recv_Time_usec,Throughput_MBps" > benchmark_results_optimized/all_results.csv
 
 # Create summary file

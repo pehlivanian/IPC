@@ -4,8 +4,11 @@
 #include <cassert>
 #include <unistd.h>
 #include <fcntl.h>
-#include <arpa/inet.h>
+#include <linux/errqueue.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <poll.h>
 #include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -17,14 +20,56 @@
 #include <mqueue.h>
 #include <errno.h>
 #include <cstdint>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <sys/sem.h>
 
 // Common definitions for all tests
 #define SOCKET_PATH "/tmp/bench.sock"
+#define ZC_SOCKET_PATH "/tmp/benchzc.sock"
 #define FIFO_PATH "/tmp/bench.fifo"
 #define QUEUE_NAME "/bench_queue"
 #define SHM_NAME "/my_shared_mem"
-#define BUFFER_SIZE (20 * 1024)
+#define BUFFER_SIZE (56 * 1024)
 #define NUM_ITERATIONS 1000
+#define SHM_KEY 9876
+#define SEM_KEY 9877
+
+// Define on linux these are defined in <linux/splice.h>
+#ifndef SPLICE_F_MOVE
+#define SPLICE_F_MOVE     (0x01)  // Move pages instead of copying
+#endif
+#ifndef SPLICE_F_NONBLOCK
+#define SPLICE_F_NONBLOCK (0x02)  // Non-blocking operation
+#endif
+#ifndef SPLICE_F_MORE
+#define SPLICE_F_MORE     (0x04)  // More data will be coming
+#endif
+#ifndef SPLICE_F_GIFT
+#define SPLICE_F_GIFT     (0x08)  // Pages passed in are a gift
+#endif
+
+// Define constants if they are not in the system headers
+#ifndef SO_ZEROCOPY
+#define SO_ZEROCOPY 60
+#endif
+
+#ifndef SO_EE_ORIGIN_ZEROCOPY
+#define SO_EE_ORIGIN_ZEROCOPY 5
+#endif
+
+#ifndef TCP_ZEROCOPY_RECEIVE
+#define TCP_ZEROCOPY_RECEIVE 35
+#endif
+
+
+// Sys V shared memory segment
+struct sysv_shared_data {
+  int ready_flag;
+  int done_flag;
+  int iteration;
+  char buffer[BUFFER_SIZE];
+};
 
 // Shared structures
 struct shared_data {
@@ -81,7 +126,7 @@ long long get_usec(void) {
     return tv.tv_sec * 1000000LL + tv.tv_usec;
 }
 
-// This function reads and discards all messages from a queue until it's empty
+
 void drain_message_queue(const char* queue_name) {
     // Open the queue for reading
     mqd_t mq = mq_open(queue_name, O_RDONLY | O_NONBLOCK);
@@ -120,6 +165,45 @@ void drain_message_queue(const char* queue_name) {
     mq_unlink(queue_name);
 }
 
+int create_semaphore() {
+  int semid = semget(SEM_KEY, 2, IPC_CREAT | 0666);
+  if (semid == -1) {
+    perror("semget");
+    exit(EXIT_FAILURE);
+  }
+
+  unsigned short init_vals[2] = {1, 0}; // writer=1, reader=0
+  if (semctl(semid, 0, SETALL, init_vals) == -1) {
+    perror("semctl");
+    exit(EXIT_FAILURE);
+  }
+
+  return semid;
+  
+}
+
+void sem_writer_wait(int semid) {
+  struct sembuf op = {0, -1, 0}; // Wait on writer semaphore
+  if (semop(semid, &op, 1) == -1) {
+    perror("semop writer wait");
+    exit(EXIT_FAILURE);
+  }
+}
+
+void sem_writer_post(int semid) {
+  struct sembuf op = {1, 1, 0}; // Signal reader semaphore
+  if (semop(semid, &op, 1) == -1) {
+    perror("semop writer post");
+    exit(EXIT_FAILURE);
+  }
+}
+
+void sem_reader_wait(int semid) {
+  
+}
+
+
+
 //				//
 // Start: FIFO Implementation	//
 //				//
@@ -156,7 +240,7 @@ void fifo_source(void) {
     long long end_time = get_usec();
 
     // printf("FIFO SOURCE:\n============\n");
-    printf("FIFO souce finished: [bytes sent: %d] %lld usec (%.2f MB/s)\n", 
+    printf("FIFO source finished: [bytes sent: %d] %lld usec (%.2f MB/s)\n", 
 	   BUFFER_SIZE,
            end_time - start_time,
            ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
@@ -210,6 +294,608 @@ void fifo_target(void) {
 //				//
 // End: FIFO Implementation	//
 //				//
+
+//							  //
+// Start: TCP/IP domain Socket Implementation (zero-copy) //
+//							  //
+// Modification to the TCP socket implementation to handle small messages correctly
+// Simplified Zero-Copy TCP Socket Implementation
+// Extremely minimal TCP socket implementation - no zero-copy at all
+void tcp_zc_socket_source(int port) {
+    char buffer[BUFFER_SIZE];
+    random_bits(buffer, BUFFER_SIZE);
+    
+    int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock_fd < 0) {
+        perror("TCP ZC Socket creation failed");
+        exit(1);
+    }
+
+    // Enable address reuse
+    int optval = 1;
+    if (setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
+        perror("TCP ZC Socket reuse failed");
+        exit(1);
+    }
+
+    // Setup zero-copy only for large messages
+    int zerocopy_enabled = 0;
+    if (BUFFER_SIZE >= 8192) {
+        // Try to enable zero-copy
+        int val = 1;
+        if (setsockopt(sock_fd, SOL_SOCKET, SO_ZEROCOPY, &val, sizeof(val)) == 0) {
+            zerocopy_enabled = 1;
+            // printf("Using zero-copy for message size %d bytes\n", BUFFER_SIZE);
+        } else {
+	  ;
+	  // printf("Zero-copy not supported (errno=%d: %s)\n", errno, strerror(errno));
+        }
+    } else {
+        printf("Message size too small for zero-copy: %d bytes\n", BUFFER_SIZE);
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    
+    // Wait for server to be ready
+    sleep(1);
+    
+    if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("TCP ZC Socket connect failed");
+        exit(1);
+    }
+
+    long long start_time = get_usec();
+    
+    for (int i = 0; i < NUM_ITERATIONS; ++i) {
+        size_t bytes_sent = 0;
+        while (bytes_sent < BUFFER_SIZE) {
+            ssize_t result;
+            
+            if (zerocopy_enabled) {
+                result = send(sock_fd, buffer + bytes_sent, 
+                             BUFFER_SIZE - bytes_sent, MSG_ZEROCOPY);
+                
+                if (result < 0 && (errno == EINVAL || errno == ENOSYS)) {
+                    // Fall back if zero-copy fails
+                    zerocopy_enabled = 0;
+                    printf("MSG_ZEROCOPY failed, falling back to regular send\n");
+                    result = send(sock_fd, buffer + bytes_sent,
+                                BUFFER_SIZE - bytes_sent, 0);
+                }
+            } else {
+                result = send(sock_fd, buffer + bytes_sent,
+                            BUFFER_SIZE - bytes_sent, 0);
+            }
+            
+            if (result < 0) {
+                if (errno == EINTR) continue;  // Interrupted, retry
+                perror("TCP ZC Socket send failed");
+                exit(EXIT_FAILURE);
+            } else if (result == 0) {
+                fprintf(stderr, "TCP ZC Connection closed by peer\n");
+                exit(EXIT_FAILURE);
+            }
+            bytes_sent += result;
+        }
+    }
+
+    long long end_time = get_usec();
+    printf("TCP ZC Socket source finished: [bytes sent: %d] %lld usec (%.2f MB/s)\n", 
+           BUFFER_SIZE,
+           end_time - start_time,
+           ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
+    
+    close(sock_fd);
+}
+
+void tcp_zc_socket_target(int port) {
+    // This function is identical to your regular tcp_target
+    // Zero-copy is only relevant on the sender side
+    char buffer[BUFFER_SIZE];
+    
+    int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock_fd < 0) {
+        perror("TCP ZC Socket creation failed");
+        exit(1);
+    }
+    
+    // Enable address reuse
+    int optval = 1;
+    if (setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
+        perror("TCP ZC Socket reuse failed");
+        exit(1);
+    }
+    
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = INADDR_ANY;
+    
+    if (bind(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("TCP ZC Socket bind failed");
+        exit(1);
+    }
+    
+    if (listen(sock_fd, 1) < 0) {
+        perror("TCP ZC Socket listen failed");
+        exit(1);
+    }
+    
+    int client_fd = accept(sock_fd, NULL, NULL);
+    if (client_fd < 0) {
+        perror("TCP ZC Socket accept failed");
+        exit(1);
+    }
+
+    long long start_time = get_usec();
+ 
+    for (int i = 0; i < NUM_ITERATIONS; ++i) {
+        size_t bytes_received = 0;
+        while (bytes_received < BUFFER_SIZE) {
+            ssize_t result = recv(client_fd, buffer + bytes_received,
+                                  BUFFER_SIZE - bytes_received, 0);
+
+            if (result < 0) {
+                if (errno == EINTR) continue;  // Interrupted, retry
+                perror("TCP ZC Socket recv failed");
+                exit(EXIT_FAILURE);
+            } else if (result == 0) {
+                fprintf(stderr, "TCP ZC Connection closed by peer\n");
+                exit(EXIT_FAILURE);
+            }
+            
+            bytes_received += result;
+        }
+    }
+    
+    long long end_time = get_usec();
+    printf("TCP ZC Socket target finished [bytes rec: %d]: %lld usec (%.2f MB/s)\n", 
+           BUFFER_SIZE,
+           end_time - start_time,
+           ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
+    
+    close(client_fd);
+    close(sock_fd);
+    
+    // Cleanup
+    char socket_path[256];
+    snprintf(socket_path, sizeof(socket_path), "/tmp/tcp_zc_bench_%d.sock", port);
+    unlink(socket_path);
+}
+//							//
+// End: TCP/IP domain Socket Implementation (zero-copy) //
+//							//
+
+
+//							//
+// Start: SPLICE/VMSPLICE Zero-Copy Implementation	//
+//							//
+
+void splice_source(void) {
+    // Create buffer with sample data
+  char *buffer = (char*)malloc(BUFFER_SIZE);
+    if (!buffer) {
+        perror("malloc failed");
+        exit(EXIT_FAILURE);
+    }
+    random_bits(buffer, BUFFER_SIZE);
+    
+    // Create socket for communication
+    int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock_fd < 0) {
+        perror("Socket creation failed");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Connect to the target
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
+    
+    sleep(1);  // Give target time to start
+    
+    if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("Socket connect failed");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Create a pipe for vmsplice/splice operations
+    int pipefd[2];
+    if (pipe(pipefd) < 0) {
+        perror("Pipe creation failed");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Try to enable pipe buffer sizing for performance
+    long pipe_size = fcntl(pipefd[1], F_GETPIPE_SZ);
+    if (pipe_size > 0 && pipe_size < BUFFER_SIZE) {
+        if (fcntl(pipefd[1], F_SETPIPE_SZ, BUFFER_SIZE) < 0) {
+            fprintf(stderr, "Warning: Could not increase pipe size (errno=%d: %s)\n", 
+                    errno, strerror(errno));
+        }
+    }
+    
+    // Set non-blocking mode on the pipe write end
+    int flags = fcntl(pipefd[1], F_GETFL);
+    if (flags >= 0) {
+        fcntl(pipefd[1], F_SETFL, flags | O_NONBLOCK);
+    }
+    
+    long long start_time = get_usec();
+    
+    for (int i = 0; i < NUM_ITERATIONS; ++i) {
+        struct iovec iov;
+        iov.iov_base = buffer;
+        iov.iov_len = BUFFER_SIZE;
+        
+        // Step 1: Move data from user space to pipe (vmsplice)
+        ssize_t bytes_spliced = vmsplice(pipefd[1], &iov, 1, SPLICE_F_GIFT);
+        if (bytes_spliced < 0) {
+            if (errno == EINVAL || errno == ENOSYS) {
+                fprintf(stderr, "vmsplice not supported on this system (errno=%d: %s)\n", 
+                        errno, strerror(errno));
+                exit(EXIT_FAILURE);
+            }
+            perror("vmsplice failed");
+            exit(EXIT_FAILURE);
+        }
+        
+        // If we couldn't send everything at once, handle it
+        size_t total_spliced = bytes_spliced;
+        while (total_spliced < BUFFER_SIZE) {
+            bytes_spliced = vmsplice(pipefd[1], &iov, 1, SPLICE_F_GIFT);
+            if (bytes_spliced < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    // Pipe is full, need to move data out first
+                    break;
+                }
+                perror("vmsplice continuation failed");
+                exit(EXIT_FAILURE);
+            }
+            total_spliced += bytes_spliced;
+        }
+        
+        // Step 2: Move data from pipe to socket (splice)
+        size_t total_sent = 0;
+        while (total_sent < BUFFER_SIZE) {
+            ssize_t sent = splice(pipefd[0], NULL, sock_fd, NULL, 
+                                  BUFFER_SIZE - total_sent, 
+                                  SPLICE_F_MOVE | SPLICE_F_MORE);
+            if (sent < 0) {
+                if (errno == EINVAL || errno == ENOSYS) {
+                    fprintf(stderr, "splice not supported on this system (errno=%d: %s)\n", 
+                            errno, strerror(errno));
+                    exit(EXIT_FAILURE);
+                }
+                perror("splice failed");
+                exit(EXIT_FAILURE);
+            }
+            total_sent += sent;
+        }
+    }
+    
+    // Wait for acknowledgment before stopping
+    char ack;
+    if (recv(sock_fd, &ack, 1, 0) != 1) {
+        perror("Failed to receive final acknowledgment");
+    }
+    
+    long long end_time = get_usec();
+    printf("SPLICE source finished: [bytes sent: %d] %lld usec (%.2f MB/s)\n", 
+           BUFFER_SIZE,
+           end_time - start_time,
+           ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
+    
+    // Clean up
+    close(pipefd[0]);
+    close(pipefd[1]);
+    close(sock_fd);
+    free(buffer);
+}
+
+void splice_target(void) {
+    int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock_fd < 0) {
+        perror("Socket creation failed");
+        exit(EXIT_FAILURE);
+    }
+    
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
+    
+    unlink(SOCKET_PATH);
+    if (bind(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("Socket bind failed");
+        exit(EXIT_FAILURE);
+    }
+    
+    if (listen(sock_fd, 1) < 0) {
+        perror("Socket listen failed");
+        exit(EXIT_FAILURE);
+    }
+    
+    int client_fd = accept(sock_fd, NULL, NULL);
+    if (client_fd < 0) {
+        perror("Socket accept failed");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Create a pipe for receiving data
+    int pipefd[2];
+    if (pipe(pipefd) < 0) {
+        perror("Pipe creation failed");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Try to optimize pipe size
+    long pipe_size = fcntl(pipefd[0], F_GETPIPE_SZ);
+    if (pipe_size > 0 && pipe_size < BUFFER_SIZE) {
+        if (fcntl(pipefd[0], F_SETPIPE_SZ, BUFFER_SIZE) < 0) {
+            fprintf(stderr, "Warning: Could not increase pipe size (errno=%d: %s)\n", 
+                    errno, strerror(errno));
+        }
+    }
+    
+    // Create a temporary file to store/process data
+    char tempfile[] = "/tmp/splice_target_XXXXXX";
+    int temp_fd = mkstemp(tempfile);
+    if (temp_fd < 0) {
+        perror("Failed to create temporary file");
+        exit(EXIT_FAILURE);
+    }
+    unlink(tempfile);  // Delete on close
+    
+    long long start_time = get_usec();
+    
+    size_t total_received = 0;
+    while (total_received < BUFFER_SIZE * NUM_ITERATIONS) {
+        // Step 1: Use splice to move data from socket to pipe
+        ssize_t bytes_received = splice(client_fd, NULL, pipefd[1], NULL, 
+                                        BUFFER_SIZE, 
+                                        SPLICE_F_MOVE | SPLICE_F_MORE);
+        if (bytes_received < 0) {
+            if (errno == EINVAL || errno == ENOSYS) {
+                fprintf(stderr, "splice not supported on this system (errno=%d: %s)\n", 
+                        errno, strerror(errno));
+                exit(EXIT_FAILURE);
+            }
+            perror("splice from socket to pipe failed");
+            exit(EXIT_FAILURE);
+        } else if (bytes_received == 0) {
+            fprintf(stderr, "Connection closed by peer\n");
+            break;
+        }
+        
+        // Step 2: Use splice to move data from pipe to file (if needed)
+        // This simulates processing the data without copying to user space
+        ssize_t bytes_written = splice(pipefd[0], NULL, temp_fd, NULL, 
+                                      bytes_received, 
+                                      SPLICE_F_MOVE);
+        if (bytes_written < 0) {
+            perror("splice from pipe to file failed");
+            exit(EXIT_FAILURE);
+        }
+        
+        total_received += bytes_received;
+    }
+    
+    // Send acknowledgment that we received everything
+    char ack = 'A';
+    if (send(client_fd, &ack, 1, 0) != 1) {
+        perror("Failed to send final acknowledgment");
+    }
+    
+    long long end_time = get_usec();
+    printf("SPLICE target finished [bytes rec: %zu]: %lld usec (%.2f MB/s)\n", 
+           total_received / 1000,
+           end_time - start_time,
+           ((double)total_received) / 1000 / (end_time - start_time));
+    
+    // Clean up
+    close(pipefd[0]);
+    close(pipefd[1]);
+    close(temp_fd);
+    close(client_fd);
+    close(sock_fd);
+    unlink(SOCKET_PATH);
+}
+
+//							//
+// End: SPLICE/VMSPLICE Zero-Copy Implementation	//
+//							//
+
+//							//
+// Start: UNIX Domain Socket Implementation (zero-copy) //
+//							//
+void socket_zc_source(void) {
+  char buffer[BUFFER_SIZE];
+  random_bits(buffer, BUFFER_SIZE);
+
+  int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (sock_fd < 0) {
+    perror("ZC Socket creation failed");
+    exit(1);
+  }
+
+  // Set socket send buffer to handle data queuing
+  int sndbuf = BUFFER_SIZE * 2; 
+  if (setsockopt(sock_fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0) {
+    perror("zc setsocketopt SO_SNDBUF failed");
+    exit(1);
+  }
+
+  // Enable zero copy notifications on this socket
+  int val = 1;
+  if (setsockopt(sock_fd, SOL_SOCKET, SO_ZEROCOPY, &val, sizeof(val)) < 0) {
+    fprintf(stderr, "Warning: SO_ZEROCOPY not supported, falling back to regular send\n");
+  }
+
+
+  struct sockaddr_un addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+  strncpy(addr.sun_path, ZC_SOCKET_PATH, sizeof(addr.sun_path) - 1);
+
+  sleep(1);
+
+  if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    perror("ZC Socket connect failed");
+    exit(1);
+  }
+
+  long long start_time = get_usec();
+
+  for (int i=0; i< NUM_ITERATIONS; ++i) {
+    size_t bytes_sent = 0;
+    while (bytes_sent < BUFFER_SIZE) {
+      ssize_t result = send(sock_fd, buffer + bytes_sent,
+			    BUFFER_SIZE - bytes_sent,
+			    MSG_ZEROCOPY);
+
+      if (result < 0 && errno == EINVAL) {
+	result = send(sock_fd, buffer + bytes_sent,
+		      BUFFER_SIZE - bytes_sent,
+		      0);
+      }
+      if (result < 0) {
+	perror("ZC Socket send failed");
+	exit(EXIT_FAILURE);
+      }  else if (result == 0) {
+	fprintf(stderr, "Connection closed by peer\n");
+	exit(EXIT_FAILURE);
+      }
+
+      bytes_sent += result;
+    }
+
+          struct msghdr msg = {0};
+      struct sockaddr_in addr;
+      char control[100];
+      struct iovec iov[1];
+      
+      msg.msg_name = &addr;
+      msg.msg_namelen = sizeof(addr);
+      msg.msg_control = control;
+      msg.msg_controllen = sizeof(control);
+      msg.msg_iov = iov;
+      msg.msg_iovlen = 1;
+      
+      // Non-blocking check for completion events
+      int flags = MSG_ERRQUEUE | MSG_DONTWAIT;
+      if (recvmsg(sock_fd, &msg, flags) < 0) {
+          if (errno != EAGAIN && errno != EWOULDBLOCK) {
+              perror("Failed to receive notification");
+          }
+      }
+  }
+
+  long long end_time = get_usec();
+    printf("ZC UNIX Domain Socket source finished: [bytes sent: %d] %lld usec (%.2f MB/s)\n", 
+           BUFFER_SIZE,
+           end_time - start_time,
+           ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
+    // print_bytes(buffer, BUFFER_SIZE);
+    close(sock_fd);  
+}
+
+void socket_zc_target(void) {
+  char buffer[BUFFER_SIZE];
+
+  int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (sock_fd < 0) {
+    perror("Socket creation failed");
+    exit(1);
+  }
+
+  struct sockaddr_un addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+  strncpy(addr.sun_path, ZC_SOCKET_PATH, sizeof(addr.sun_path) - 1);
+
+  unlink(ZC_SOCKET_PATH);
+  if (bind(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    perror("ZC Socket bind failed");
+    exit(1);
+  }
+
+  if (listen(sock_fd, 1) < 0) {
+    perror("Socket listwn failed");
+    exit(1);
+  }
+
+  int client_fd = accept(sock_fd, NULL, NULL);
+  if (client_fd < 0) {
+    perror("ZC Socket accept failed");
+    exit(1);
+  }
+
+  // Set socket receive buffer for the client connection
+  int rcvbuf = BUFFER_SIZE * 2;
+  if (setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
+    perror("setsockopt SO_RCVBUF failed");
+    exit(1);
+  }
+
+  // Try to enable zero copy if supported
+  int val = 1;
+  if (setsockopt(client_fd, SOL_SOCKET, SO_ZEROCOPY, &val, sizeof(val)) < 0) {
+    fprintf(stderr, "Zero copy receiving not supported, using standard recv\n");
+  }
+
+  // Verify the buffer we set (it might be rounded up by the system)
+  int actual_rcvbuf;
+  socklen_t len = sizeof(actual_rcvbuf);
+  if (getsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &actual_rcvbuf, &len) < 0) {
+    perror("getsockopt SO_FCVBUF failed");
+    exit(1);
+  }
+  assert(actual_rcvbuf >= rcvbuf && "Receive buffer not set up correctly");
+
+  long long start_time = get_usec();
+
+  for (int i=0; i < NUM_ITERATIONS; ++i) {
+
+    size_t bytes_received = 0;
+    while (bytes_received < BUFFER_SIZE) {
+
+      size_t result = recv(client_fd, buffer + bytes_received,
+			   BUFFER_SIZE - bytes_received,
+			   0);
+	if (result < 0) {
+	  perror("Socket recv failed");
+	  exit(EXIT_FAILURE);
+	} else if (result == 0) {
+	  fprintf(stderr, "Connection closed by peer\n");
+	  exit(EXIT_FAILURE);
+	}
+	
+	bytes_received += result;      
+    }
+  }
+
+    long long end_time = get_usec();
+    // printf("UNIX Domain Socket TARGET:\n============\n");
+    printf("ZC UNIX Domain Socket target finished [bytes rec: %d]: %lld usec (%.2f MB/s)\n", 
+           BUFFER_SIZE,
+           end_time - start_time,
+           ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
+    // print_bytes(buffer, BUFFER_SIZE);
+    close(client_fd);
+    close(sock_fd);
+    unlink(ZC_SOCKET_PATH);
+ 
+}
+//							//
+// End: UNIX Domain Socket Implementation (zero-copy) //
+//							//
 
 //						//
 // Start: UNIX Domain Socket Implementation	//
@@ -685,7 +1371,7 @@ void mq_source(void) {
     long long end_time = get_usec();
 
     // printf("POSIX MQ SOURCE:\n============\n");
-    printf("POSIX MQ souce finished: [bytes sent: %d] %lld usec (%.2f MB/s)\n", 
+    printf("POSIX MQ source finished: [bytes sent: %d] %lld usec (%.2f MB/s)\n", 
 	   BUFFER_SIZE,
            end_time - start_time,
            ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
@@ -749,7 +1435,7 @@ void eventfd_sender(int efd, struct shared_data* shm) {
 
     // Signal to receiver
     uint64_t u = 1;
-    write(efd, &u, sizeof(uint64_t));
+    ssize_t result = write(efd, &u, sizeof(uint64_t));
 
     num_iterations--;
   }
@@ -757,7 +1443,7 @@ void eventfd_sender(int efd, struct shared_data* shm) {
   long long end_time = get_usec();
 
   // printf("Shmem+Eventfd SOURCE:\n============\n");
-  printf("Shmem+Eventfd souce finished: [bytes sent: %d] %lld usec (%.2f MB/s)\n", 
+  printf("Shmem+Eventfd source finished: [bytes sent: %d] %lld usec (%.2f MB/s)\n", 
 	 BUFFER_SIZE,
 	 end_time - start_time,
 	 ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
@@ -774,7 +1460,7 @@ void eventfd_receiver(int efd, struct shared_data* shm) {
 
   while (num_iterations) {
     uint64_t u;
-    read(efd, &u, sizeof(uint64_t));
+    ssize_t result = read(efd, &u, sizeof(uint64_t));
     num_iterations--;
   }
 
@@ -788,6 +1474,9 @@ void eventfd_receiver(int efd, struct shared_data* shm) {
   // print_bytes(shm->buffer, BUFFER_SIZE);
 
 }
+//					//
+// End: Shmem+Eventfd Implementation	//
+//					//
 
 int main(int argc, char **argv) {
 
@@ -848,7 +1537,7 @@ int main(int argc, char **argv) {
         socket_source();
         wait(NULL);
     }
-    
+
     printf("\n=== Message Queue Benchmark ===\n");
     pid_t mq_pid = fork();
     if (mq_pid == 0) {
@@ -885,6 +1574,16 @@ int main(int argc, char **argv) {
       exit(EXIT_FAILURE);
     }
 
+    printf("\n== TCP/IP ZC Socket Benchmark===\n");
+    pid_t zc_socket_pid = fork();
+    if (zc_socket_pid == 0) {
+      tcp_zc_socket_target(54324);
+      exit(0);
+    } else {
+      tcp_zc_socket_source(54324);
+      wait(NULL);
+    }
+    
     printf("\n=== UDP Socket Benchmark ===\n");
     pid_t udp_pid = fork();
     if (udp_pid == 0) {
@@ -895,8 +1594,22 @@ int main(int argc, char **argv) {
       wait(NULL);
     } else {
       perror("fork failed");
-      exit(EXIT_FAILURE);
+      exit,(EXIT_FAILURE);
     }
 
+    printf("\n=== Splice Benchmark ===\n");
+    pid_t splice_pid = fork();
+    if (splice_pid == 0) {
+      splice_target();
+      exit(0);
+    } else if (splice_pid > 0) {
+      splice_source();
+      wait(NULL);
+    } else {
+      perror("fork failed");
+      exit(EXIT_FAILURE);
+    }
+    
     return 0;
 }
+

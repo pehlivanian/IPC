@@ -32,7 +32,9 @@ ipc_methods = {
     'mq_results.csv': ('POSIX Message Queue', '#ff7f0e'),
     'shm_results.csv': ('Shared Memory + Eventfd', '#d62728'),
     'tcp_results.csv': ('TCP Socket', '#9467bd'),
-    'udp_results.csv': ('UDP Socket', '#8c564b')
+    'tcp_zc_results.csv' : ('TCP ZC Socket', '#a50d8d'),
+    'udp_results.csv': ('UDP Socket', '#8c564b'),
+    'splice_results.csv' : ('SPLICE', '#4ffd0b'),
 }
 
 def create_subplot(methods_to_include, output_filename):
@@ -74,7 +76,9 @@ all_methods = [
     'POSIX Message Queue', 
     'Shared Memory + Eventfd',
     'TCP Socket',
-    'UDP Socket'
+    'TCP ZC Socket',
+    'UDP Socket',
+    'SPLICE'
 ]
 create_subplot(all_methods, 'ipc_performance_all_with_time.pdf')
 
@@ -84,9 +88,25 @@ methods_no_shm = [
     'Unix Domain Socket', 
     'POSIX Message Queue',
     'TCP Socket',
-    'UDP Socket'
+    'TCP ZC Socket',
+    'UDP Socket',
+    'SPLICE'
 ]
 create_subplot(methods_no_shm, 'ipc_performance_no_shm_with_time.pdf')
+
+methods_tcp = [
+    'TCP Socket',
+    'TCP ZC Socket'
+]
+
+create_subplot(methods_tcp, 'ipc_performance_tcp_v_tcp_zc_with_time.pdf')
+
+methods_mq_splice = [
+    'POSIX Message Queue',
+    'SPLICE'
+]
+
+create_subplot(methods_mq_splice, 'ipc_performance_mq_splice_with_time.pdf')
 
 print("Plots have been saved as 'ipc_performance_all_with_time.pdf' and 'ipc_performance_no_shm_with_time.pdf'")
 

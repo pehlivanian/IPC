@@ -477,13 +477,25 @@ void tcp_zc_socket_target(int port) {
 //							//
 
 void splice_source(void) {
+
+  /*
     // Create buffer with sample data
   char *buffer = (char*)malloc(BUFFER_SIZE);
     if (!buffer) {
         perror("malloc failed");
         exit(EXIT_FAILURE);
     }
+  */
+
+  long page_size = sysconf(_SC_PAGESIZE);
+  char *buffer = NULL;
+  if (posix_memalign((void **)&buffer, page_size, BUFFER_SIZE) != 0) {
+    perror("posix_memalign failed");
+    exit(EXIT_FAILURE);
+  }
+  
     random_bits(buffer, BUFFER_SIZE);
+
     
     // Create socket for communication
     int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -643,6 +655,8 @@ void splice_target(void) {
                     errno, strerror(errno));
         }
     }
+
+    /*
     
     // Create a temporary file to store/process data
     char tempfile[] = "/tmp/splice_target_XXXXXX";
@@ -652,6 +666,17 @@ void splice_target(void) {
         exit(EXIT_FAILURE);
     }
     unlink(tempfile);  // Delete on close
+    
+    */
+
+    long page_size = sysconf(_SC_PAGESIZE);
+
+    char *buffer = NULL;
+    if (posix_memalign((void **)&buffer, page_size, BUFFER_SIZE) != 0) {
+      perror("posix_memalign failed");
+      exit(EXIT_FAILURE);
+    }
+
     
     long long start_time = get_usec();
     
@@ -674,16 +699,21 @@ void splice_target(void) {
             break;
         }
         
+
         // Step 2: Use splice to move data from pipe to file (if needed)
         // This simulates processing the data without copying to user space
+	/*
         ssize_t bytes_written = splice(pipefd[0], NULL, temp_fd, NULL, 
                                       bytes_received, 
                                       SPLICE_F_MOVE);
+	*/
+
+	ssize_t bytes_written = read(pipefd[0], buffer, bytes_received);
         if (bytes_written < 0) {
-            perror("splice from pipe to file failed");
+            perror("read from pipe to file failed");
             exit(EXIT_FAILURE);
         }
-        
+
         total_received += bytes_received;
     }
     
@@ -702,7 +732,7 @@ void splice_target(void) {
     // Clean up
     close(pipefd[0]);
     close(pipefd[1]);
-    close(temp_fd);
+    // close(temp_fd);
     close(client_fd);
     close(sock_fd);
     unlink(SOCKET_PATH);

@@ -30,7 +30,7 @@
 #define FIFO_PATH "/tmp/bench.fifo"
 #define QUEUE_NAME "/bench_queue"
 #define SHM_NAME "/my_shared_mem"
-#define BUFFER_SIZE (56 * 1024)
+#define BUFFER_SIZE (10 * 1024)
 #define NUM_ITERATIONS 1000
 #define SHM_KEY 9876
 #define SEM_KEY 9877
@@ -319,8 +319,9 @@ void tcp_zc_socket_source(int port) {
     }
 
     // Setup zero-copy only for large messages
+    const int MIN_ZC_SIZE = 20 * 1024;
     int zerocopy_enabled = 0;
-    if (BUFFER_SIZE >= 8192) {
+    if (BUFFER_SIZE >= MIN_ZC_SIZE) {
         // Try to enable zero-copy
         int val = 1;
         if (setsockopt(sock_fd, SOL_SOCKET, SO_ZEROCOPY, &val, sizeof(val)) == 0) {
@@ -331,7 +332,8 @@ void tcp_zc_socket_source(int port) {
 	  // printf("Zero-copy not supported (errno=%d: %s)\n", errno, strerror(errno));
         }
     } else {
-        printf("Message size too small for zero-copy: %d bytes\n", BUFFER_SIZE);
+      ;
+      //printf("Message size too small for zero-copy: %d bytes\n", BUFFER_SIZE);
     }
 
     struct sockaddr_in addr;
@@ -538,13 +540,14 @@ void splice_source(void) {
     if (flags >= 0) {
         fcntl(pipefd[1], F_SETFL, flags | O_NONBLOCK);
     }
+
+    struct iovec iov;
+    iov.iov_base = buffer;
+    iov.iov_len = BUFFER_SIZE;
     
     long long start_time = get_usec();
     
     for (int i = 0; i < NUM_ITERATIONS; ++i) {
-        struct iovec iov;
-        iov.iov_base = buffer;
-        iov.iov_len = BUFFER_SIZE;
         
         // Step 1: Move data from user space to pipe (vmsplice)
         ssize_t bytes_spliced = vmsplice(pipefd[1], &iov, 1, SPLICE_F_GIFT);
@@ -676,8 +679,10 @@ void splice_target(void) {
       perror("posix_memalign failed");
       exit(EXIT_FAILURE);
     }
-
     
+    struct iovec iov;
+    iov.iov_base = buffer;
+
     long long start_time = get_usec();
     
     size_t total_received = 0;
@@ -708,11 +713,21 @@ void splice_target(void) {
                                       SPLICE_F_MOVE);
 	*/
 
+	/*
 	ssize_t bytes_written = read(pipefd[0], buffer, bytes_received);
         if (bytes_written < 0) {
             perror("read from pipe to file failed");
             exit(EXIT_FAILURE);
         }
+	*/
+
+	iov.iov_len = bytes_received;
+
+	ssize_t bytes_written = vmsplice(pipefd[0], &iov, 1, 0);
+	if (bytes_written < 0) {
+	  perror("vmsplice from pipe to buffer failed");
+	  exit(EXIT_FAILURE);
+	}
 
         total_received += bytes_received;
     }

@@ -63,7 +63,7 @@ run_benchmark() {
     # Replace the BUFFER_SIZE definition
     sed -i "s/#define BUFFER_SIZE.*/#define BUFFER_SIZE (${size})/" benchmarks_temp.cpp
     
-    g++ -O3 -o benchmarks benchmarks_temp.cpp -lrt
+    g++ -O3 -march=native -mtune=native -falign-functions=64 -falign-loops=64 -fno-strict-aliasing -D_GNU_SOURCE -DNDEBUG -o benchmarks benchmarks_temp.cpp -lrt
     if [ $? -ne 0 ]; then
         echo "Compilation failed for buffer size ${size}"
         return 1
@@ -157,7 +157,7 @@ echo "" >> benchmark_results_optimized/summary.txt
 
 # Generate array of buffer sizes from 1KB to 49KB
 sizes=()
-for ((i=1; i<=48; i++)); do
+for ((i=1; i<=64; i++)); do
     sizes+=($((i * 1024)))
 done
 

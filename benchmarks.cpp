@@ -30,7 +30,7 @@
 #define FIFO_PATH "/tmp/bench.fifo"
 #define QUEUE_NAME "/bench_queue"
 #define SHM_NAME "/my_shared_mem"
-#define BUFFER_SIZE (10 * 1024)
+#define BUFFER_SIZE (36 * 1024)
 #define NUM_ITERATIONS 1000
 #define SHM_KEY 9876
 #define SEM_KEY 9877
@@ -1523,6 +1523,244 @@ void eventfd_receiver(int efd, struct shared_data* shm) {
 // End: Shmem+Eventfd Implementation	//
 //					//
 
+//					//
+// Begin: Cross Memory Attach		//
+//					//
+// The address information structure to share memory location
+typedef struct {
+    void *addr;     // Memory address in the source process
+    size_t size;    // Size of the memory region
+    pid_t pid;      // PID of the source process
+} addr_info_t;
+
+// Target-side: Function to read memory from another process
+ssize_t process_vm_readv_wrapper(pid_t pid, void *local_addr, void *remote_addr, size_t size) {
+    struct iovec local[1];
+    struct iovec remote[1];
+    
+    local[0].iov_base = local_addr;
+    local[0].iov_len = size;
+    remote[0].iov_base = remote_addr;
+    remote[0].iov_len = size;
+    
+    return process_vm_readv(pid, local, 1, remote, 1, 0);
+}
+
+// Source-side: Function to write memory to another process
+ssize_t process_vm_writev_wrapper(pid_t pid, void *local_addr, void *remote_addr, size_t size) {
+    struct iovec local[1];
+    struct iovec remote[1];
+    
+    local[0].iov_base = local_addr;
+    local[0].iov_len = size;
+    remote[0].iov_base = remote_addr;
+    remote[0].iov_len = size;
+    
+    return process_vm_writev(pid, local, 1, remote, 1, 0);
+}
+
+void cma_source(void) {
+    // Allocate buffer with sample data
+  char *buffer = (char *)malloc(BUFFER_SIZE);
+    if (!buffer) {
+        perror("malloc failed");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Fill buffer with data
+    random_bits(buffer, BUFFER_SIZE);
+    
+    // Create socket for initial coordination
+    int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock_fd < 0) {
+        perror("Socket creation failed");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Connect to target
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
+    
+    sleep(1); // Give target time to set up
+    
+    if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("Socket connect failed");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Send our PID and buffer address to the target
+    addr_info_t info;
+    info.addr = buffer;
+    info.size = BUFFER_SIZE;
+    info.pid = getpid();
+    
+    if (send(sock_fd, &info, sizeof(info), 0) != sizeof(info)) {
+        perror("Failed to send address info");
+        exit(EXIT_FAILURE);
+    }
+    
+    printf("CMA source ready with buffer at %p (PID: %d)\n", buffer, info.pid);
+    
+    // Synchronize with target before starting benchmark
+    char sync_char;
+    if (recv(sock_fd, &sync_char, 1, 0) != 1) {
+        perror("Failed to receive synchronization");
+        exit(EXIT_FAILURE);
+    }
+    
+    long long start_time = get_usec();
+    
+    // For CMA, we don't actually send anything - the target reads directly from our memory
+    // We just need to keep the buffer available and wait for notifications
+    
+    for (int i = 0; i < NUM_ITERATIONS; ++i) {
+        // Wait for target to signal it's ready to read
+        if (recv(sock_fd, &sync_char, 1, 0) != 1) {
+            perror("Failed to receive ready signal");
+            exit(EXIT_FAILURE);
+        }
+        
+        // We could potentially update the buffer here if this were a real application
+        
+        // Signal that data is ready
+        sync_char = 'R';
+        if (send(sock_fd, &sync_char, 1, 0) != 1) {
+            perror("Failed to send ready signal");
+            exit(EXIT_FAILURE);
+        }
+        
+        // Wait for target to signal it's done reading
+        if (recv(sock_fd, &sync_char, 1, 0) != 1) {
+            perror("Failed to receive completion signal");
+            exit(EXIT_FAILURE);
+        }
+    }
+    
+    long long end_time = get_usec();
+    printf("CMA source finished: [bytes accessed: %d] %lld usec (%.2f MB/s)\n", 
+           BUFFER_SIZE,
+           end_time - start_time,
+           ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
+    
+    // Wait a bit before freeing the buffer to ensure target has completed
+    sleep(1);
+    
+    // Clean up
+    close(sock_fd);
+    free(buffer);
+}
+
+void cma_target(void) {
+    // Allocate buffer for our local copy of the data
+  char *buffer = (char *)malloc(BUFFER_SIZE);
+    if (!buffer) {
+        perror("malloc failed");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Create socket for coordination
+    int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock_fd < 0) {
+        perror("Socket creation failed");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Set up server socket
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
+    
+    unlink(SOCKET_PATH);
+    if (bind(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("Socket bind failed");
+        exit(EXIT_FAILURE);
+    }
+    
+    if (listen(sock_fd, 1) < 0) {
+        perror("Socket listen failed");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Accept connection from source
+    int client_fd = accept(sock_fd, NULL, NULL);
+    if (client_fd < 0) {
+        perror("Socket accept failed");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Receive address info from source
+    addr_info_t info;
+    if (recv(client_fd, &info, sizeof(info), 0) != sizeof(info)) {
+        perror("Failed to receive address info");
+        exit(EXIT_FAILURE);
+    }
+    
+    printf("CMA target received source info: addr=%p, size=%zu, pid=%d\n", 
+           info.addr, info.size, info.pid);
+    
+    // Synchronize with source before starting benchmark
+    char sync_char = 'S';
+    if (send(client_fd, &sync_char, 1, 0) != 1) {
+        perror("Failed to send synchronization");
+        exit(EXIT_FAILURE);
+    }
+    
+    long long start_time = get_usec();
+    
+    for (int i = 0; i < NUM_ITERATIONS; ++i) {
+        // Signal that we're ready to read
+        sync_char = 'T';
+        if (send(client_fd, &sync_char, 1, 0) != 1) {
+            perror("Failed to send ready signal");
+            exit(EXIT_FAILURE);
+        }
+        
+        // Wait for source to signal data is ready
+        if (recv(client_fd, &sync_char, 1, 0) != 1) {
+            perror("Failed to receive ready signal");
+            exit(EXIT_FAILURE);
+        }
+        
+        // Read directly from source process memory using CMA
+        ssize_t bytes_read = process_vm_readv_wrapper(info.pid, buffer, info.addr, BUFFER_SIZE);
+        if (bytes_read < 0) {
+            perror("process_vm_readv failed");
+            if (errno == EPERM) {
+                fprintf(stderr, "Permission denied: Check process permissions or CAP_SYS_PTRACE capability\n");
+            }
+            exit(EXIT_FAILURE);
+        } else if (bytes_read != BUFFER_SIZE) {
+            fprintf(stderr, "Partial read: %zd/%d bytes\n", bytes_read, BUFFER_SIZE);
+            // Continue anyway
+        }
+        
+        // Signal completion
+        sync_char = 'C';
+        if (send(client_fd, &sync_char, 1, 0) != 1) {
+            perror("Failed to send completion signal");
+            exit(EXIT_FAILURE);
+        }
+    }
+    
+    long long end_time = get_usec();
+    printf("CMA target finished [bytes read: %d]: %lld usec (%.2f MB/s)\n", 
+           BUFFER_SIZE,
+           end_time - start_time,
+           ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
+    
+    // Clean up
+    close(client_fd);
+    close(sock_fd);
+    unlink(SOCKET_PATH);
+    free(buffer);
+}
+//					//
+// End: Cross Memory Attach		//
+//					//
+
 int main(int argc, char **argv) {
 
   if (argc > 1 && strcmp(argv[1], "--cleanup") == 0) {
@@ -1655,6 +1893,19 @@ int main(int argc, char **argv) {
       exit(EXIT_FAILURE);
     }
     
+  printf("\n=== Cross Memory Attach Benchmark ===\n");
+  pid_t cma_pid = fork();
+  if (cma_pid == 0) {
+    cma_target();
+    exit(0);
+  } else if (cma_pid > 0) {
+    cma_source();
+    wait(NULL);
+  } else {
+    perror("fork failed");
+    exit(EXIT_FAILURE);
+  }
+
+
     return 0;
 }
-

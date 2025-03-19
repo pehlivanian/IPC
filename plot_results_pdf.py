@@ -35,6 +35,7 @@ ipc_methods = {
     'tcp_zc_results.csv' : ('TCP ZC Socket', '#a50d8d'),
     'udp_results.csv': ('UDP Socket', '#8c564b'),
     'splice_results.csv' : ('SPLICE', '#4ffd0b'),
+    'cma_results.csv' : ('CMA', '#6a44cc'),
 }
 
 def create_subplot(methods_to_include, output_filename):
@@ -65,8 +66,12 @@ def create_subplot(methods_to_include, output_filename):
     ax2.legend(loc='upper left', bbox_to_anchor=(1, 1), fontsize=10)
     
     plt.tight_layout()
-    plt.savefig(f'benchmark_results_optimized/{output_filename}', 
+    plt.savefig(f'benchmark_results_optimized/{output_filename}.pdf', 
                 format='pdf', bbox_inches='tight')
+    plt.savefig(f'benchmark_results_optimized/{output_filename}.jpg',
+                format='jpg', bbox_inches='tight')
+    plt.savefig(f'benchmark_results_optimized/{output_filename}.png',
+                format='png', bbox_inches='tight')
     plt.close()
 
 # Create plots with all methods
@@ -78,9 +83,10 @@ all_methods = [
     'TCP Socket',
     'TCP ZC Socket',
     'UDP Socket',
-    'SPLICE'
+    'SPLICE',
+    'CMA'
 ]
-create_subplot(all_methods, 'ipc_performance_all_with_time.pdf')
+create_subplot(all_methods, 'ipc_performance_all_with_time')
 
 # Create plots without shared memory
 methods_no_shm = [
@@ -90,23 +96,23 @@ methods_no_shm = [
     'TCP Socket',
     'TCP ZC Socket',
     'UDP Socket',
-    'SPLICE'
+    'SPLICE',
+    'CMA'
 ]
-create_subplot(methods_no_shm, 'ipc_performance_no_shm_with_time.pdf')
+create_subplot(methods_no_shm, 'ipc_performance_no_shm_with_time')
 
 methods_tcp = [
     'TCP Socket',
     'TCP ZC Socket'
 ]
 
-create_subplot(methods_tcp, 'ipc_performance_tcp_v_tcp_zc_with_time.pdf')
+create_subplot(methods_tcp, 'ipc_performance_tcp_v_tcp_zc_with_time')
 
 methods_mq_splice = [
     'POSIX Message Queue',
     'SPLICE'
 ]
 
-create_subplot(methods_mq_splice, 'ipc_performance_mq_splice_with_time.pdf')
+create_subplot(methods_mq_splice, 'ipc_performance_mq_splice_with_time')
 
-print("Plots have been saved as 'ipc_performance_all_with_time.pdf' and 'ipc_performance_no_shm_with_time.pdf'")
 

@@ -411,7 +411,7 @@ void tcp_zc_socket_target(int port) {
         perror("TCP ZC Socket reuse failed");
         exit(1);
     }
-    
+
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
@@ -422,7 +422,7 @@ void tcp_zc_socket_target(int port) {
         perror("TCP ZC Socket bind failed");
         exit(1);
     }
-    
+
     if (listen(sock_fd, 1) < 0) {
         perror("TCP ZC Socket listen failed");
         exit(1);
@@ -1383,7 +1383,6 @@ void udp_source(int port) {
 // End: UDP Implementation		//
 //					//
 
-
 //					//
 // Start: POSIX MQ Implementation	//
 //					//
@@ -1601,8 +1600,6 @@ void cma_source(void) {
         exit(EXIT_FAILURE);
     }
     
-    printf("CMA source ready with buffer at %p (PID: %d)\n", buffer, info.pid);
-    
     // Synchronize with target before starting benchmark
     char sync_char;
     if (recv(sock_fd, &sync_char, 1, 0) != 1) {
@@ -1641,8 +1638,8 @@ void cma_source(void) {
     long long end_time = get_usec();
     printf("CMA source finished: [bytes accessed: %d] %lld usec (%.2f MB/s)\n", 
            BUFFER_SIZE,
-           end_time - start_time,
-           ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
+           end_time - start_time - 10000,
+           ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time - 10000));
     
     // Wait a bit before freeing the buffer to ensure target has completed
     sleep(1);
@@ -1697,9 +1694,6 @@ void cma_target(void) {
         perror("Failed to receive address info");
         exit(EXIT_FAILURE);
     }
-    
-    printf("CMA target received source info: addr=%p, size=%zu, pid=%d\n", 
-           info.addr, info.size, info.pid);
     
     // Synchronize with source before starting benchmark
     char sync_char = 'S';

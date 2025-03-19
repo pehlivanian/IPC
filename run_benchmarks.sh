@@ -144,6 +144,12 @@ extract_metrics() {
 	   local throughput=$(echo "$source_line" | awk -F'[()]' '{print $2}' | awk '{print $1}')
 	   echo "$size,$source_time,$throughput"
 	   ;;
+	"CMA")
+	   local source_line=$(grep "CMA source finished:" "$output_file" | tail -n 1)
+	   local source_time=$(echo "$source_line" | awk '{for(i=1;i<=NF;i++) if($i=="usec") print $(i-1)}')
+	   local throughput=$(echo "$source_line" | awk -F'[()]' '{print $2}' | awk '{print $1}')
+	   echo "$size,$source_time,$throughput"
+	   ;;
 
     esac
 }
@@ -178,6 +184,7 @@ echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_optimized/
 echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_optimized/mq_results.csv
 echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_optimized/shm_results.csv
 echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_optimized/splice_results.csv
+echo "Buffer_Size,Send_Time,Recv_Time,Throughput" > benchmark_results_optimized/cma_results.csv
 
 # Run benchmarks for each size
 # Run benchmarks for each size
@@ -215,6 +222,7 @@ for size in "${sizes[@]}"; do
     mq_metrics=$(extract_metrics "${output_file}" "POSIX MQ" "${size}")
     shm_metrics=$(extract_metrics "${output_file}" "Shmem+Eventfd" "${size}")
     splice_metrics=$(extract_metrics "${output_file}" "SPLICE" "${size}")
+    cma_metrics=$(extract_metrics "${output_file}" "CMA" "${size}")
     
     # Write results to individual files
     [ -n "$fifo_metrics" ] && echo "$fifo_metrics" >> benchmark_results_optimized/fifo_results.csv
@@ -225,6 +233,7 @@ for size in "${sizes[@]}"; do
     [ -n "$mq_metrics" ] && echo "$mq_metrics" >> benchmark_results_optimized/mq_results.csv
     [ -n "$shm_metrics" ] && echo "$shm_metrics" >> benchmark_results_optimized/shm_results.csv
     [ -n "$splice_metrics" ] && echo "$splice_metrics" >> benchmark_results_optimized/splice_results.csv
+    [ -n "$cma_metrics" ] && echo "$cma_metrics" >> benchmark_results_optimized/cma_results.csv
 
     # Also write to the combined results file
     echo "${size},${fifo_metrics}" >> benchmark_results_optimized/all_results.csv
@@ -235,6 +244,7 @@ for size in "${sizes[@]}"; do
     echo "${size},${mq_metrics}" >> benchmark_results_optimized/all_results.csv
     echo "${size},${shm_metrics}" >> benchmark_results_optimized/all_results.csv
     echo "${size},${splice_metrics}" >> benchmark_results_optimized/all_results.csv
+    echo "${size},${cma_metrics}" >> benchmark_results_optimized/all_results.csv
     
     # Add debug output to verify data is being written
     echo "Processed results for size ${size}:"
@@ -246,13 +256,15 @@ for size in "${sizes[@]}"; do
     echo "MQ: ${size},${mq_metrics}"
     echo "SHM: ${size},${shm_metrics}"
     echo "SPLICE: ${size},${splice_metrics}"
+    echo "CMA: ${size},${cma_metrics}"
+    
 done
 
 # Create a summary report
 echo "Benchmark Summary" > benchmark_results_optimized/summary.txt
 echo "=================" >> benchmark_results_optimized/summary.txt
 
-for method in fifo tcp tcp_zc udp socket mq shm splice; do
+for method in fifo tcp tcp_zc udp socket mq shm splice cma; do
     echo "" >> benchmark_results_optimized/summary.txt
     echo "$(tr '[:lower:]' '[:upper:]' <<< ${method}) Results:" >> benchmark_results_optimized/summary.txt
     echo "Buffer Size (B), Send Time (-Fìs), Recv Time (ìs), Throughput (MB/s)" >> benchmark_results_optimized/summary.txt-A

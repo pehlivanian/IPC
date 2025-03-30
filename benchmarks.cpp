@@ -128,14 +128,13 @@ long long get_usec(void) {
 
 
 void drain_message_queue(const char* queue_name) {
-    // Open the queue for reading
+
     mqd_t mq = mq_open(queue_name, O_RDONLY | O_NONBLOCK);
     if (mq == (mqd_t)-1) {
         // If we can't open it, it might not exist, which is fine
         return;
     }
 
-    // Get queue attributes to know message size
     struct mq_attr attr;
     if (mq_getattr(mq, &attr) == -1) {
         mq_close(mq);
@@ -151,10 +150,8 @@ void drain_message_queue(const char* queue_name) {
         ssize_t bytes = mq_receive(mq, buffer, attr.mq_msgsize, &prio);
         if (bytes == -1) {
             if (errno == EAGAIN) {
-                // Queue is empty
                 break;
             }
-            // Some other error occurred
             break;
         }
     }
@@ -164,44 +161,6 @@ void drain_message_queue(const char* queue_name) {
     mq_close(mq);
     mq_unlink(queue_name);
 }
-
-int create_semaphore() {
-  int semid = semget(SEM_KEY, 2, IPC_CREAT | 0666);
-  if (semid == -1) {
-    perror("semget");
-    exit(EXIT_FAILURE);
-  }
-
-  unsigned short init_vals[2] = {1, 0}; // writer=1, reader=0
-  if (semctl(semid, 0, SETALL, init_vals) == -1) {
-    perror("semctl");
-    exit(EXIT_FAILURE);
-  }
-
-  return semid;
-  
-}
-
-void sem_writer_wait(int semid) {
-  struct sembuf op = {0, -1, 0}; // Wait on writer semaphore
-  if (semop(semid, &op, 1) == -1) {
-    perror("semop writer wait");
-    exit(EXIT_FAILURE);
-  }
-}
-
-void sem_writer_post(int semid) {
-  struct sembuf op = {1, 1, 0}; // Signal reader semaphore
-  if (semop(semid, &op, 1) == -1) {
-    perror("semop writer post");
-    exit(EXIT_FAILURE);
-  }
-}
-
-void sem_reader_wait(int semid) {
-  
-}
-
 
 
 //				//
@@ -300,7 +259,6 @@ void fifo_target(void) {
 //							  //
 // Modification to the TCP socket implementation to handle small messages correctly
 // Simplified Zero-Copy TCP Socket Implementation
-// Extremely minimal TCP socket implementation - no zero-copy at all
 void tcp_zc_socket_source(int port) {
     char buffer[BUFFER_SIZE];
     random_bits(buffer, BUFFER_SIZE);
@@ -318,7 +276,7 @@ void tcp_zc_socket_source(int port) {
         exit(1);
     }
 
-    // Setup zero-copy only for large messages
+    // Only use zero-copy for large messages ( >= 20Mb)
     const int MIN_ZC_SIZE = 20 * 1024;
     int zerocopy_enabled = 0;
     if (BUFFER_SIZE >= MIN_ZC_SIZE) {
@@ -395,8 +353,8 @@ void tcp_zc_socket_source(int port) {
 }
 
 void tcp_zc_socket_target(int port) {
-    // This function is identical to your regular tcp_target
     // Zero-copy is only relevant on the sender side
+  // This should be identical to vanilla tcp_socket_target
     char buffer[BUFFER_SIZE];
     
     int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -478,41 +436,48 @@ void tcp_zc_socket_target(int port) {
 // Start: SPLICE/VMSPLICE Zero-Copy Implementation	//
 //							//
 
-void splice_source(void) {
+void splice_source(bool aligned) {
 
-  /*
-    // Create buffer with sample data
-  char *buffer = (char*)malloc(BUFFER_SIZE);
-    if (!buffer) {
-        perror("malloc failed");
-        exit(EXIT_FAILURE);
-    }
-  */
-
-  long page_size = sysconf(_SC_PAGESIZE);
   char *buffer = NULL;
-  if (posix_memalign((void **)&buffer, page_size, BUFFER_SIZE) != 0) {
-    perror("posix_memalign failed");
-    exit(EXIT_FAILURE);
+  char desc[50];
+  if (aligned) {
+    strcpy(desc, "aligned");
+  } else {
+    strcpy(desc, "unaligned");
+  }
+
+  if (aligned) {
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (posix_memalign((void **)&buffer, page_size, BUFFER_SIZE) != 0) {
+      perror("posix_memalign failed");
+      exit(EXIT_FAILURE);
+    }
+  } else {
+    buffer = (char*)malloc(BUFFER_SIZE);
+    if (!buffer) {
+      perror("malloc failed");
+      exit(EXIT_FAILURE);
+    }
   }
   
     random_bits(buffer, BUFFER_SIZE);
 
     
-    // Create socket for communication
+    // Socket used for synchronization only - probably a more
+    // efficient way to do this; we use a UNIX domain socket
     int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock_fd < 0) {
         perror("Socket creation failed");
         exit(EXIT_FAILURE);
     }
     
-    // Connect to the target
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
-    
-    sleep(1);  // Give target time to start
+
+    // Give target time to start
+    sleep(1);
     
     if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         perror("Socket connect failed");
@@ -526,7 +491,9 @@ void splice_source(void) {
         exit(EXIT_FAILURE);
     }
     
-    // Try to enable pipe buffer sizing for performance
+    // Try to enable pipe buffer sizing for better performance
+    // although in our case pipe_size should be 64Kb and 
+    // resizing should not take place
     long pipe_size = fcntl(pipefd[1], F_GETPIPE_SZ);
     if (pipe_size > 0 && pipe_size < BUFFER_SIZE) {
         if (fcntl(pipefd[1], F_SETPIPE_SZ, BUFFER_SIZE) < 0) {
@@ -535,7 +502,7 @@ void splice_source(void) {
         }
     }
     
-    // Set non-blocking mode on the pipe write end
+    // Non-blocking mode
     int flags = fcntl(pipefd[1], F_GETFL);
     if (flags >= 0) {
         fcntl(pipefd[1], F_SETFL, flags | O_NONBLOCK);
@@ -602,7 +569,8 @@ void splice_source(void) {
     }
     
     long long end_time = get_usec();
-    printf("SPLICE source finished: [bytes sent: %d] %lld usec (%.2f MB/s)\n", 
+    printf("SPLICE %s source finished: [bytes sent: %d] %lld usec (%.2f MB/s)\n", 
+	   desc,
            BUFFER_SIZE,
            end_time - start_time,
            ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
@@ -614,7 +582,15 @@ void splice_source(void) {
     free(buffer);
 }
 
-void splice_target(void) {
+void splice_target(bool aligned) {
+
+  char desc[50];
+  if (aligned) {
+    strcpy(desc, "aligned");
+  } else {
+    strcpy(desc, "unalignged");
+  }
+
     int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock_fd < 0) {
         perror("Socket creation failed");
@@ -650,7 +626,7 @@ void splice_target(void) {
         exit(EXIT_FAILURE);
     }
     
-    // Try to optimize pipe size
+    // Try to optimize pipe size; again, should not be triggered
     long pipe_size = fcntl(pipefd[0], F_GETPIPE_SZ);
     if (pipe_size > 0 && pipe_size < BUFFER_SIZE) {
         if (fcntl(pipefd[0], F_SETPIPE_SZ, BUFFER_SIZE) < 0) {
@@ -675,9 +651,18 @@ void splice_target(void) {
     long page_size = sysconf(_SC_PAGESIZE);
 
     char *buffer = NULL;
-    if (posix_memalign((void **)&buffer, page_size, BUFFER_SIZE) != 0) {
-      perror("posix_memalign failed");
-      exit(EXIT_FAILURE);
+
+    if (aligned) {
+      if (posix_memalign((void **)&buffer, page_size, BUFFER_SIZE) != 0) {
+	perror("posix_memalign failed");
+	exit(EXIT_FAILURE);
+      }
+    } else {
+      buffer = (char *)malloc(BUFFER_SIZE);
+      if (!buffer) {
+	perror("Malloc failed");
+	exit(EXIT_FAILURE);
+      }
     }
     
     struct iovec iov;
@@ -732,14 +717,15 @@ void splice_target(void) {
         total_received += bytes_received;
     }
     
-    // Send acknowledgment that we received everything
+    // Send ack back over communication channel
     char ack = 'A';
     if (send(client_fd, &ack, 1, 0) != 1) {
         perror("Failed to send final acknowledgment");
     }
     
     long long end_time = get_usec();
-    printf("SPLICE target finished [bytes rec: %zu]: %lld usec (%.2f MB/s)\n", 
+    printf("SPLICE %s target finished [bytes rec: %zu]: %lld usec (%.2f MB/s)\n", 
+	   desc,
            total_received / 1000,
            end_time - start_time,
            ((double)total_received) / 1000 / (end_time - start_time));
@@ -750,6 +736,7 @@ void splice_target(void) {
     // close(temp_fd);
     close(client_fd);
     close(sock_fd);
+    free(buffer);
     unlink(SOCKET_PATH);
 }
 
@@ -833,7 +820,6 @@ void socket_zc_source(void) {
       msg.msg_iov = iov;
       msg.msg_iovlen = 1;
       
-      // Non-blocking check for completion events
       int flags = MSG_ERRQUEUE | MSG_DONTWAIT;
       if (recvmsg(sock_fd, &msg, flags) < 0) {
           if (errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -872,7 +858,7 @@ void socket_zc_target(void) {
   }
 
   if (listen(sock_fd, 1) < 0) {
-    perror("Socket listwn failed");
+    perror("Socket listen failed");
     exit(1);
   }
 
@@ -1399,8 +1385,13 @@ void mq_source(void) {
     
     mqd_t mq = mq_open(QUEUE_NAME, O_WRONLY | O_CREAT, 0644, &attr);
     if (mq == (mqd_t)-1) {
-        perror("Message queue open failed");
-        exit(1);
+      // Try again?
+      usleep(100);
+      mq = mq_open(QUEUE_NAME, O_WRONLY | O_CREAT, 0644, &attr);
+      if (mq == (mqd_t)-1) {	
+	perror("Message queue open failed");
+	exit(1);
+      }
     }
     
     int num_iterations = NUM_ITERATIONS;
@@ -1429,9 +1420,15 @@ void mq_target(void) {
     
     mqd_t mq = mq_open(QUEUE_NAME, O_RDONLY);
     if (mq == (mqd_t)-1) {
-        perror("Message queue open failed");
-        exit(1);
+      // Try again?
+      usleep(100);
+      mq = mq_open(QUEUE_NAME, O_RDONLY);
+      if (mq == (mqd_t)-1) {	
+	perror("Message queue open failed");
+	exit(1);
+      }
     }
+
 
     int num_iterations = NUM_ITERATIONS;
     ssize_t bytes;
@@ -1559,37 +1556,34 @@ ssize_t process_vm_writev_wrapper(pid_t pid, void *local_addr, void *remote_addr
 }
 
 void cma_source(void) {
-    // Allocate buffer with sample data
   char *buffer = (char *)malloc(BUFFER_SIZE);
     if (!buffer) {
         perror("malloc failed");
         exit(EXIT_FAILURE);
     }
     
-    // Fill buffer with data
     random_bits(buffer, BUFFER_SIZE);
-    
-    // Create socket for initial coordination
+
+    // Socket creation used for synchronization
     int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock_fd < 0) {
         perror("Socket creation failed");
         exit(EXIT_FAILURE);
     }
     
-    // Connect to target
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, SOCKET_PATH, sizeof(addr.sun_path) - 1);
-    
-    sleep(1); // Give target time to set up
+   
+    // Give the target time to set up
+    sleep(1);
     
     if (connect(sock_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         perror("Socket connect failed");
         exit(EXIT_FAILURE);
     }
     
-    // Send our PID and buffer address to the target
     addr_info_t info;
     info.addr = buffer;
     info.size = BUFFER_SIZE;
@@ -1621,14 +1615,12 @@ void cma_source(void) {
         
         // We could potentially update the buffer here if this were a real application
         
-        // Signal that data is ready
         sync_char = 'R';
         if (send(sock_fd, &sync_char, 1, 0) != 1) {
             perror("Failed to send ready signal");
             exit(EXIT_FAILURE);
         }
         
-        // Wait for target to signal it's done reading
         if (recv(sock_fd, &sync_char, 1, 0) != 1) {
             perror("Failed to receive completion signal");
             exit(EXIT_FAILURE);
@@ -1650,21 +1642,18 @@ void cma_source(void) {
 }
 
 void cma_target(void) {
-    // Allocate buffer for our local copy of the data
   char *buffer = (char *)malloc(BUFFER_SIZE);
     if (!buffer) {
         perror("malloc failed");
         exit(EXIT_FAILURE);
     }
     
-    // Create socket for coordination
     int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock_fd < 0) {
         perror("Socket creation failed");
         exit(EXIT_FAILURE);
     }
     
-    // Set up server socket
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
@@ -1681,14 +1670,12 @@ void cma_target(void) {
         exit(EXIT_FAILURE);
     }
     
-    // Accept connection from source
     int client_fd = accept(sock_fd, NULL, NULL);
     if (client_fd < 0) {
         perror("Socket accept failed");
         exit(EXIT_FAILURE);
     }
     
-    // Receive address info from source
     addr_info_t info;
     if (recv(client_fd, &info, sizeof(info), 0) != sizeof(info)) {
         perror("Failed to receive address info");
@@ -1705,14 +1692,12 @@ void cma_target(void) {
     long long start_time = get_usec();
     
     for (int i = 0; i < NUM_ITERATIONS; ++i) {
-        // Signal that we're ready to read
         sync_char = 'T';
         if (send(client_fd, &sync_char, 1, 0) != 1) {
             perror("Failed to send ready signal");
             exit(EXIT_FAILURE);
         }
         
-        // Wait for source to signal data is ready
         if (recv(client_fd, &sync_char, 1, 0) != 1) {
             perror("Failed to receive ready signal");
             exit(EXIT_FAILURE);
@@ -1727,11 +1712,11 @@ void cma_target(void) {
             }
             exit(EXIT_FAILURE);
         } else if (bytes_read != BUFFER_SIZE) {
-            fprintf(stderr, "Partial read: %zd/%d bytes\n", bytes_read, BUFFER_SIZE);
-            // Continue anyway
+	  // fprintf(stderr, "Partial read: %zd/%d bytes\n", bytes_read, BUFFER_SIZE);
+	  // Continue anyway
+	  ;
         }
         
-        // Signal completion
         sync_char = 'C';
         if (send(client_fd, &sync_char, 1, 0) != 1) {
             perror("Failed to send completion signal");
@@ -1780,6 +1765,7 @@ int main(int argc, char **argv) {
     printf("Buffer size: %d bytes\n", BUFFER_SIZE);
     printf("Number of iterations: %d\n\n", NUM_ITERATIONS);
 
+    /*
     printf("=== FIFO Benchmark ===\n");
     unlink(FIFO_PATH);
     
@@ -1874,19 +1860,34 @@ int main(int argc, char **argv) {
       exit,(EXIT_FAILURE);
     }
 
-    printf("\n=== Splice Benchmark ===\n");
+*/
+    printf("\n=== Splice Aligned Benchmark ===\n");
     pid_t splice_pid = fork();
     if (splice_pid == 0) {
-      splice_target();
+      splice_target(true);
       exit(0);
     } else if (splice_pid > 0) {
-      splice_source();
+      splice_source(true);
+      wait(NULL);
+    } else {
+      perror("fork failed");
+      exit(EXIT_FAILURE);
+    }
+
+    printf("\n=== Splice Unaligned Benchmark ===\n");
+    pid_t splice_unaligned_pid = fork();
+    if (splice_unaligned_pid == 0) {
+      splice_target(false);
+      exit(0);
+    } else if (splice_unaligned_pid > 0) {
+      splice_source(false);
       wait(NULL);
     } else {
       perror("fork failed");
       exit(EXIT_FAILURE);
     }
     
+    /*
   printf("\n=== Cross Memory Attach Benchmark ===\n");
   pid_t cma_pid = fork();
   if (cma_pid == 0) {
@@ -1900,6 +1901,7 @@ int main(int argc, char **argv) {
     exit(EXIT_FAILURE);
   }
 
+    */
 
     return 0;
 }

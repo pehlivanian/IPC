@@ -115,4 +115,39 @@ methods_mq_splice = [
 
 create_subplot(methods_mq_splice, 'ipc_performance_mq_splice_with_time')
 
+methods_tcp_udp = [
+    'TCP Socket',
+    'UDP Socket'
+    ]
 
+create_subplot(methods_tcp_udp, 'ipc_performance_tcp_v_udp_with_time')
+
+methods_same_host = [
+    'Shared Memory + Eventfd',    
+    'FIFO',
+    'Unix Domain Socket',
+    'POSIX Message Queue',
+    'SPLICE',
+    'CMA'
+    ]
+
+create_subplot(methods_same_host, 'ipc_performance_same_host_with_time')
+
+methods_same_host_no_shm = [
+    'FIFO',
+    'Unix Domain Socket',
+    'POSIX Message Queue',
+    'SPLICE',
+    'CMA'
+    ]
+
+create_subplot(methods_same_host_no_shm, 'ipc_performance_same_host_no_shm_with_time')
+
+
+methods_across_hosts = [
+    'TCP Socket',
+    'TCP ZC Socket',
+    'UDP Socket',
+    ]
+
+create_subplot(methods_across_hosts, 'ipc_performance_across_hosts')

@@ -569,8 +569,7 @@ void splice_source(bool aligned) {
     }
     
     long long end_time = get_usec();
-    printf("SPLICE %s source finished: [bytes sent: %d] %lld usec (%.2f MB/s)\n", 
-	   desc,
+    printf("SPLICE source finished: [bytes sent: %d] %lld usec (%.2f MB/s)\n", 
            BUFFER_SIZE,
            end_time - start_time,
            ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
@@ -724,8 +723,7 @@ void splice_target(bool aligned) {
     }
     
     long long end_time = get_usec();
-    printf("SPLICE %s target finished [bytes rec: %zu]: %lld usec (%.2f MB/s)\n", 
-	   desc,
+    printf("SPLICE target finished [bytes rec: %zu]: %lld usec (%.2f MB/s)\n", 
            total_received / 1000,
            end_time - start_time,
            ((double)total_received) / 1000 / (end_time - start_time));
@@ -1765,7 +1763,6 @@ int main(int argc, char **argv) {
     printf("Buffer size: %d bytes\n", BUFFER_SIZE);
     printf("Number of iterations: %d\n\n", NUM_ITERATIONS);
 
-    /*
     printf("=== FIFO Benchmark ===\n");
     unlink(FIFO_PATH);
     
@@ -1860,8 +1857,7 @@ int main(int argc, char **argv) {
       exit,(EXIT_FAILURE);
     }
 
-*/
-    printf("\n=== Splice Aligned Benchmark ===\n");
+    printf("\n=== Splice Benchmark ===\n");
     pid_t splice_pid = fork();
     if (splice_pid == 0) {
       splice_target(true);
@@ -1874,20 +1870,6 @@ int main(int argc, char **argv) {
       exit(EXIT_FAILURE);
     }
 
-    printf("\n=== Splice Unaligned Benchmark ===\n");
-    pid_t splice_unaligned_pid = fork();
-    if (splice_unaligned_pid == 0) {
-      splice_target(false);
-      exit(0);
-    } else if (splice_unaligned_pid > 0) {
-      splice_source(false);
-      wait(NULL);
-    } else {
-      perror("fork failed");
-      exit(EXIT_FAILURE);
-    }
-    
-    /*
   printf("\n=== Cross Memory Attach Benchmark ===\n");
   pid_t cma_pid = fork();
   if (cma_pid == 0) {
@@ -1900,8 +1882,6 @@ int main(int argc, char **argv) {
     perror("fork failed");
     exit(EXIT_FAILURE);
   }
-
-    */
 
     return 0;
 }

@@ -150,4 +150,22 @@ methods_across_hosts = [
     'UDP Socket',
     ]
 
-create_subplot(methods_across_hosts, 'ipc_performance_across_hosts')
+create_subplot(methods_across_hosts, 'ipc_performance_across_hosts_with_time')
+
+methods_heat1 = [
+    'FIFO', 
+    'Unix Domain Socket', 
+    'POSIX Message Queue', 
+    'TCP Socket'
+    ]
+
+create_subplot(methods_heat1, 'ipc_performance_heat1_with_time')
+
+methods_heat2 = [
+    'TCP ZC Socket',
+    'UDP Socket',
+    'SPLICE',
+    'CMA'
+    ]
+
+create_subplot(methods_heat2, 'ipc_performance_heat2_with_time')

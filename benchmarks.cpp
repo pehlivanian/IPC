@@ -24,13 +24,19 @@
 #include <sys/shm.h>
 #include <sys/sem.h>
 
+// Aeron-related headers
+#include <Aeron.h>
+#include <util/CommandOptionParser.h>
+#include <concurrent/NoOpIdleStrategy.h>
+#include <FragmentAssembler.h>
+
 // Common definitions for all tests
 #define SOCKET_PATH "/tmp/bench.sock"
 #define ZC_SOCKET_PATH "/tmp/benchzc.sock"
 #define FIFO_PATH "/tmp/bench.fifo"
 #define QUEUE_NAME "/bench_queue"
 #define SHM_NAME "/my_shared_mem"
-#define BUFFER_SIZE (36 * 1024)
+#define BUFFER_SIZE (21 * 1024)
 #define NUM_ITERATIONS 1000
 #define SHM_KEY 9876
 #define SEM_KEY 9877
@@ -62,6 +68,8 @@
 #define TCP_ZEROCOPY_RECEIVE 35
 #endif
 
+using namespace aeron::util;
+using namespace aeron;
 
 // Sys V shared memory segment
 struct sysv_shared_data {
@@ -76,6 +84,82 @@ struct shared_data {
     size_t size;
     char buffer[BUFFER_SIZE];
 };
+
+// Aeron-related
+static const std::chrono::duration<long, std::milli> IDLE_SLEEP_MS(1);
+static const std::chrono::duration<long, std::micro> IDLE_SLEEP_MU(1);
+static const int FRAGMENTS_LIMIT = 100;
+std::atomic<bool> running(true);
+
+void sigIntHandler(int) {
+  std::cerr << "Setting running to false\n";
+  running = false;
+}
+
+void sigUsr1Handler(int) {
+  // This signal is used to indicate that the source is finished
+  printf("Received SIGUSR1 - source is finished\n");
+  // Wait a bit for any more messages
+  // std::this_thread::sleep_for(std::chrono::seconds(1));
+  std::this_thread::sleep_for(std::chrono::microseconds(5));
+  running = false;
+}
+
+namespace aeron { namespace defaults {
+
+  const static std::string DEFAULT_CHANNEL = "aeron:udp?endpoint=localhost:20121";
+  const static std::int32_t DEFAULT_STREAM_ID = 1001;
+  const static long long DEFAULT_NUMBER_OF_MESSAGES = NUM_ITERATIONS;
+  const static int DEFAULT_LINGER_TIMEOUT_MS = 0;
+
+  struct Settings {
+    std::string dirPrefix;
+    std::string channel = aeron::defaults::DEFAULT_CHANNEL;
+    std::int32_t streamId = aeron::defaults::DEFAULT_STREAM_ID;
+    std::int64_t numberOfMessages = aeron::defaults::DEFAULT_NUMBER_OF_MESSAGES;
+    int lingerTimeoutMs = aeron::defaults::DEFAULT_LINGER_TIMEOUT_MS;
+  };
+
+}}
+
+template<typename T>
+class SleepingIdleTStrategy
+{
+public:
+  explicit SleepingIdleTStrategy(const std::chrono::duration<long, T> duration) :
+    m_duration(duration)
+  {}
+
+  inline void idle(int workCount) {
+    if (0 == workCount) {
+      std::this_thread::sleep_for(m_duration);
+    }
+  }
+
+  inline void reset()
+  {}
+
+  inline void idle()
+  {
+    std::this_thread::sleep_for(m_duration);
+  }
+
+private:
+  std::chrono::duration<long, T> m_duration;
+};
+
+fragment_handler_t accumulateBytes(std::size_t& bytes_read, std::atomic<int>& messages_received) {
+  return [&bytes_read, &messages_received](const AtomicBuffer &buffer, util::index_t offset, util::index_t length, const Header &header){
+    std::size_t length_t = static_cast<std::size_t>(length);
+    bytes_read += length;
+    /*
+      messages_received++;
+      std::cerr << "bytes_read: " << bytes_read 
+      << " messages_received: " << messages_received
+      << std::endl;
+    */
+  };
+}
 
 void print_bytes(char *buffer, ssize_t sz) {
   printf("First 10 bytes: ");
@@ -118,6 +202,19 @@ void random_bits(char* buffer, size_t num_bytes) {
         exit(1);
     }
     close(fd);
+}
+
+void random_bits_unsigned(unsigned char* buffer, size_t num_bytes) {
+  int fd = open("/dev/urandom", O_RDONLY);
+  if (fd < 0) {
+    perror("open urandom");
+    exit(1);
+  }
+  ssize_t bytes = read(fd, buffer, num_bytes);
+  if (bytes != num_bytes) {
+    perror("read urandom");
+    exit(1);
+  }
 }
 
 long long get_usec(void) {
@@ -1738,6 +1835,454 @@ void cma_target(void) {
 // End: Cross Memory Attach		//
 //					//
 
+//					//
+// Begin: Aeron MQ			//
+//					//
+
+void aeron_target(void) {
+  // std::cout << "Target: Starting Aeron target process" << std::endl;
+
+    // Setup Aeron
+    aeron::defaults::Settings settings;
+    aeron::Context context;
+
+    std::atomic<int> messages_received{0};
+
+    context.newSubscriptionHandler([](const std::string &channel,
+  				    std::int32_t streamId,
+  				    std::int64_t correlationId) {
+				     //       std::cout << "Target: New subscription on channel: " << channel
+				     //                << " stream: " << streamId << std::endl;
+				     ;
+    });
+
+    // std::cout << "Target: Connecting to Aeron..." << std::endl;
+    std::shared_ptr<Aeron> aeron = Aeron::connect(context);
+    signal(SIGINT, sigIntHandler);
+    signal(SIGUSR1, sigUsr1Handler);
+
+    // std::cout << "Target: Adding subscription on " << settings.channel
+    //           << " stream " << settings.streamId << std::endl;
+    std::int64_t id = aeron->addSubscription(settings.channel, settings.streamId);
+
+    // Wait for subscription to be valid
+    std::shared_ptr<Subscription> subscription = aeron->findSubscription(id);
+    while (!subscription && running) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      subscription = aeron->findSubscription(id);
+    }
+
+    if (!running) {
+      std::cout << "Target: Aborted before subscription was valid" << std::endl;
+      return;
+    }
+
+    // std::cout << "Target: Subscription ready with channel status: "
+    //           << subscription->channelStatus() << std::endl;
+
+    // Setup variables for receiving
+    std::size_t bytes_received = 0;
+    std::size_t total_bytes_received = 0;
+    std::atomic<int> total_messages_received{0};
+    int consecutiveEmptyPolls = 0;
+    const int MAX_EMPTY_POLLS = 10000; // Early termination after enough empty polls
+
+    // Create handler for accumulating bytes
+    FragmentAssembler fragmentAssembler(
+      [&bytes_received, &total_messages_received](const AtomicBuffer &buffer, 
+                                              util::index_t offset, 
+                                              util::index_t length, 
+                                              const Header &header) {
+        bytes_received += length;
+        total_messages_received++;
+      });
+
+    fragment_handler_t handler = fragmentAssembler.handler();
+
+    // Use a sleeping idle strategy to avoid high CPU usage
+    // SleepingIdleStrategy idleStrategy(std::chrono::milliseconds(1);)
+    SleepingIdleTStrategy<std::micro> idleStrategy(std::chrono::microseconds(10));
+  
+
+    // std::cout << "Target: Starting to receive messages..." << std::endl;
+
+    int iterationsCompleted = 0;
+
+    long long start_time = get_usec();
+
+    while (iterationsCompleted < NUM_ITERATIONS && running) {
+      // Poll for fragments
+      int fragments_read = subscription->poll(handler, FRAGMENTS_LIMIT);
+
+      // Handle empty polls
+      if (fragments_read == 0) {
+        consecutiveEmptyPolls++;
+
+        // Print debug info periodically during empty polls
+        if (consecutiveEmptyPolls % 1000 == 0) {
+          // std::cout << "Target: " << consecutiveEmptyPolls << " empty polls, received "
+	  //          << total_messages_received.load() << " of " << NUM_ITERATIONS
+	  //          << " messages, bytes: " << bytes_received << std::endl;
+        }
+
+        // Early termination if we stop receiving messages but have received some
+        if (consecutiveEmptyPolls > MAX_EMPTY_POLLS && total_messages_received.load() > 0) {
+          // std::cout << "Target: No messages received for too long, assuming completion" << std::endl;
+          break;
+        }
+      } else {
+        consecutiveEmptyPolls = 0;
+
+        // Update iterations based on messages received
+        if (total_messages_received > iterationsCompleted) {
+          iterationsCompleted = total_messages_received;
+
+          // Progress feedback
+          if (iterationsCompleted % 100 == 0) {
+            // std::cout << "Target: Received " << iterationsCompleted << " messages" << std::endl;
+	    ;
+          }
+        }
+      }
+      
+      // Use idle strategy based on fragment count
+      idleStrategy.idle(fragments_read);
+
+      // Add to total bytes received
+      total_bytes_received += bytes_received;
+      bytes_received = 0; // Reset for next iteration
+    }
+
+    long long end_time = get_usec();
+    double elapsed_seconds = (end_time - start_time) / 1000000.0;
+    int final_messages_received = total_messages_received.load();
+    double throughput = final_messages_received > 0 ?
+                        ((double)BUFFER_SIZE * final_messages_received) / (end_time - start_time - 2000000) : 0;
+
+    // std::cout << "Target: Completed receiving " << final_messages_received << "/"
+    //           << NUM_ITERATIONS << " messages" << std::endl;
+
+    printf("Aeron Queue target finished [bytes rec: %zu]: %lld usec (%.2f MB/s)\n",
+           total_bytes_received / NUM_ITERATIONS,
+           end_time - start_time - 2000000,
+           throughput);
+  }
+
+
+void aeron_target_old(void) {
+
+  aeron::defaults::Settings settings;
+  aeron::Context context;
+
+  std::atomic<int> messages_received{0};
+  
+  context.newSubscriptionHandler([](const std::string &channel, 
+				    std::int32_t streamId, 
+				    std::int64_t correlationId)
+				 {
+				   ;
+				 });
+				    
+ 
+  std::shared_ptr<Aeron> aeron = Aeron::connect(context);
+  signal(SIGINT, sigIntHandler);
+  signal(SIGUSR1, sigUsr1Handler);
+  std::int64_t id = aeron->addSubscription(settings.channel, settings.streamId);
+
+  std::shared_ptr<Subscription> subscription = aeron->findSubscription(id);
+  // Wait for the subscription to be valid
+  while (!subscription && running) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    subscription = aeron->findSubscription(id);
+  }
+
+  std::size_t bytes_received = 0;
+  std::size_t total_bytes_received = 0;
+  int consecutiveEmptyPolls = 0;
+  std::int64_t channelStatus = subscription->channelStatus();
+
+  FragmentAssembler fragmentAssembler(accumulateBytes(bytes_received, messages_received));
+  fragment_handler_t handler = fragmentAssembler.handler();
+  NoOpIdleStrategy idleStrategy;
+
+  long long start_time = get_usec();
+  
+  for (int i=0; i<NUM_ITERATIONS && running; ++i) {
+    bytes_received = 0;
+    while (bytes_received < BUFFER_SIZE) {
+      int fragments_read = subscription->poll(handler, FRAGMENTS_LIMIT);
+      
+      if (fragments_read == 0) {
+	consecutiveEmptyPolls++;
+	if (consecutiveEmptyPolls % 1000 == 0) {
+	  break;
+	}
+
+      } else {
+	consecutiveEmptyPolls = 0;
+      }
+
+      // std::cerr << "i: " << i << std::endl;
+      /*
+      std::cerr << "(BUFFER_SIZE, bytes_read): ("
+		<< BUFFER_SIZE << ", "
+		<< bytes_read << ", "
+		<< ")"
+		<< std::endl;
+      */
+
+      idleStrategy.idle(fragments_read);
+      
+
+      total_bytes_received += bytes_received;
+    }
+    
+  }
+
+  long long end_time = get_usec();
+  
+  // printf("Aeron QueueTARGET:\n============\n");
+  printf("Aeron Queue target finished [bytes rec: %d]: %lld usec (%.2f MB/s)\n", 
+	 total_bytes_received,
+	 end_time - start_time - 1000000,
+	 ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time - 1000000));
+  // print_bytes(shm->buffer, BUFFER_SIZE);
+
+  
+}
+
+void aeron_source(void) {
+  // std::cout << "Source: Starting Aeron source process" << std::endl;
+
+      // Create buffer for data
+      unsigned char *buffer = (unsigned char*)malloc(BUFFER_SIZE);
+      if (!buffer) {
+        perror("Malloc failed");
+        exit(EXIT_FAILURE);
+      }
+
+      // Fill buffer with random data
+      random_bits_unsigned(buffer, BUFFER_SIZE);
+      // std::cout << "Source: Filled buffer with random data" << std::endl;
+
+      // Setup Aeron
+      aeron::defaults::Settings settings;
+      aeron::Context context;
+
+      // std::cout << "Source: Connecting to Aeron..." << std::endl;
+      std::shared_ptr<Aeron> aeron = Aeron::connect(context);
+      signal(SIGINT, sigIntHandler);
+
+      // std::cout << "Source: Adding publication on " << settings.channel
+      //           << " stream " << settings.streamId << std::endl;
+      std::int64_t id = aeron->addPublication(settings.channel, settings.streamId);
+
+      // Wait for publication to be valid
+      std::shared_ptr<Publication> publication = aeron->findPublication(id);
+      while (!publication && running) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        publication = aeron->findPublication(id);
+      }
+
+      if (!running) {
+        // std::cout << "Source: Aborted before publication was valid" << std::endl;
+        free(buffer);
+        return;
+      }
+
+      // std::cout << "Source: Publication ready with channel status: "
+      //           << publication->channelStatus() << std::endl;
+
+      // Setup AtomicBuffer for the entire message at once
+      concurrent::AtomicBuffer srcBuffer(buffer, BUFFER_SIZE);
+      int messages_sent = 0;
+
+      // Give target a chance to set up
+      // std::cout << "Source: Waiting for target to initialize..." << std::endl;
+      std::this_thread::sleep_for(std::chrono::seconds(2));
+
+      long long start_time = get_usec();
+
+      for (int i=0; i < NUM_ITERATIONS && running; ++i) {
+        // Refresh buffer with new random data for each iteration
+        srcBuffer.putBytes(0, buffer, BUFFER_SIZE);
+
+        // Try to offer the buffer until successful or error
+        std::int64_t result;
+        bool sent = false;
+        int retries = 0;
+
+        while (!sent && running && retries < 1000) {
+          result = publication->offer(srcBuffer);
+
+          if (result > 0) {
+            // Successfully sent
+            messages_sent++;
+            sent = true;
+
+            // Progress feedback every 100 messages
+            if (messages_sent % 100 == 0) {
+              // std::cout << "Source: Sent " << messages_sent << " messages" << std::endl;
+	      ;
+            }
+
+          } else if (result == -2) {
+            // No subscribers, wait longer
+            if (retries % 100 == 0) {
+              // std::cout << "Source: Publication not connected. Waiting..." << std::endl;
+	      ;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            retries++;
+
+          } else if (result == -1) {
+            // Back pressure, try again after a short delay
+            // std::this_thread::sleep_for(std::chrono::microseconds(10));
+            retries++;
+
+          } else if (result == -3 || result == -4) {
+            // std::cerr << "Source: Publication error: " << result << std::endl;
+            running = false;
+            break;
+          }
+        }
+
+        if (retries >= 1000) {
+          std::cerr << "Source: Failed to send message after 1000 retries" << std::endl;
+        }
+
+        if (!running) break;
+      }
+
+      long long end_time = get_usec();
+      double elapsed_seconds = (end_time - start_time) / 1000000.0;
+      double throughput = messages_sent > 0 ?
+                         ((double)BUFFER_SIZE * messages_sent) / (end_time - start_time) : 0;
+
+      // std::cout << "Source: Completed sending " << messages_sent << "/"
+      //           << NUM_ITERATIONS << " messages" << std::endl;
+
+      printf("Aeron Queue source finished: [bytes sent: %d x %d messages] %lld usec (%.2f MB/s)\n",
+             BUFFER_SIZE, messages_sent,
+             end_time - start_time,
+             throughput);
+
+      // Allow time for any in-flight messages to be processed
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      free(buffer);
+  }
+
+
+void aeron_source_old(void) {
+  
+    unsigned char *buffer = NULL;
+    buffer = (unsigned char*)malloc(BUFFER_SIZE);
+    if (!buffer) {
+      perror("Malloc failed");
+      exit(EXIT_FAILURE);
+    }
+
+    random_bits_unsigned(buffer, BUFFER_SIZE);
+    
+    aeron::defaults::Settings settings;
+    aeron::Context context;
+    
+    std::shared_ptr<Aeron> aeron = Aeron::connect(context);
+    signal(SIGINT, sigIntHandler);
+    
+    std::int64_t id = aeron->addPublication(settings.channel, settings.streamId);
+    
+    std::shared_ptr<Publication> publication = aeron->findPublication(id);
+    while (!publication && running) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      publication = aeron->findPublication(id);
+    }
+
+    if (!running) {
+      std::cout << "Source: Aborted before publication was valid" << std::endl;
+      delete buffer;
+      return;
+    }
+
+    const std::int64_t channelStatus = publication->channelStatus();
+
+    concurrent::AtomicBuffer srcBuffer(buffer, BUFFER_SIZE);
+    int messages_sent = 0;
+
+    // Give target a chance to listen
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    size_t total_bytes_sent = 0;
+
+    long long start_time = get_usec();
+
+    for (int i=0; i<NUM_ITERATIONS && running; ++i) {
+      size_t bytes_sent = 0;
+      while (bytes_sent < BUFFER_SIZE) {
+	/*
+	  srcBuffer.putBytes(0, 
+	  reinterpret_cast<std::uint8_t *>(buffer + bytes_sent), 
+	  BUFFER_SIZE - bytes_sent);
+	*/
+	srcBuffer.putBytes(0, 
+			   buffer + bytes_sent,
+			   BUFFER_SIZE - bytes_sent);
+			   
+	std::int64_t result = publication->offer(srcBuffer, 0, BUFFER_SIZE - bytes_sent);
+
+	if (result > 0) {
+	  // std::cerr << "Bytes sent: " << result << std::endl;
+	bytes_sent += result;
+	}
+	else if (result == -1) {
+	  // Back pressure
+	  std::this_thread::sleep_for(std::chrono::microseconds(100));
+	} else if (result == -2) {
+	  // No subscribers, wait longer
+	  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	} else if (result == -3 || result == -4) {
+	  // Publiscation error
+	  running = false;
+	  break;
+	}
+	
+	
+	if (!running) break;
+	
+	// std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+	/*
+	std::cerr << "(NUM_ITERATION, i): (" << NUM_ITERATIONS
+		  << ", " << i << ") "
+		  << "(BUFFER_SIZE, bytes_sent): ("
+		  << BUFFER_SIZE << ", "
+		  << bytes_sent << ")"
+		  << std::endl;
+	*/
+      }
+
+      total_bytes_sent += bytes_sent;
+      
+      // std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    long long end_time = get_usec();
+    // printf("Aeron Queue SOURCE:\n============\n");
+    printf("Aeron Queue source finished: [bytes sent: %d] %lld usec (%.2f MB/s)\n", 
+           total_bytes_sent,
+           end_time - start_time,
+           ((double)BUFFER_SIZE * NUM_ITERATIONS) / (end_time - start_time));
+    // print_bytes(buffer, BUFFER_SIZE);
+
+    free(buffer);
+
+}
+
+
+//					//
+// End: Aeron MQ			//
+//					//
+
 int main(int argc, char **argv) {
 
   if (argc > 1 && strcmp(argv[1], "--cleanup") == 0) {
@@ -1754,6 +2299,7 @@ int main(int argc, char **argv) {
     exit(EXIT_FAILURE);
   }
 
+  /*
   int efd = eventfd(0, EFD_SEMAPHORE);
   if (efd == -1) {
     perror("eventfd");
@@ -1817,10 +2363,10 @@ int main(int argc, char **argv) {
         eventfd_sender(efd, shm);
         wait(NULL);
     }
-
     close(efd);
     munmap(shm, sizeof(struct shared_data));
 
+  */
     printf("\n=== TCP/IP Socket Benchmark ===\n");
     pid_t tcp_pid = fork();
     if (tcp_pid == 0) {
@@ -1857,6 +2403,7 @@ int main(int argc, char **argv) {
       exit,(EXIT_FAILURE);
     }
 
+    /*
     printf("\n=== Splice Benchmark ===\n");
     pid_t splice_pid = fork();
     if (splice_pid == 0) {
@@ -1877,6 +2424,24 @@ int main(int argc, char **argv) {
     exit(0);
   } else if (cma_pid > 0) {
     cma_source();
+    wait(NULL);
+  } else {
+    perror("fork failed");
+    exit(EXIT_FAILURE);
+  }
+
+*/
+
+  printf("\n=== Aeron Queue Attach Benchmark ===\n");
+  pid_t aeron_pid = fork();
+  if (aeron_pid == 0) {
+    aeron_target();
+    exit(0);
+  } else if (aeron_pid > 0) {
+    aeron_source();
+    
+    // Signal to child that we're done sending
+    kill(aeron_pid, SIGUSR1);
     wait(NULL);
   } else {
     perror("fork failed");

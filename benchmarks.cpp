@@ -36,7 +36,7 @@
 #define FIFO_PATH "/tmp/bench.fifo"
 #define QUEUE_NAME "/bench_queue"
 #define SHM_NAME "/my_shared_mem"
-#define BUFFER_SIZE (21 * 1024)
+#define BUFFER_SIZE (2 * 1024)
 #define NUM_ITERATIONS 1000
 #define SHM_KEY 9876
 #define SEM_KEY 9877
